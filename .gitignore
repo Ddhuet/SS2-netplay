@@ -1,1 +1,7 @@
 /Shining_Soul_II.gba
+/.cargo-home/
+/app/target/
+/saves/
+*.sav
+/recordings/
+/app/*-phase4.log

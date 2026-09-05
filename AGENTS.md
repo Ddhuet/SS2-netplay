@@ -90,3 +90,14 @@ rather than:
 ```rust
 speculate -> rewrite -> hope
 ```
+Phase 4 guidance:
+- Keep manual captures, initial save copies, state dumps, and captured executables
+  under ignored `recordings/`; preserve original artifacts when rechecking a fix.
+- Record button masks at `Link::try_tick`, and compare only settled rollback
+  observations against a direct baseline. Matched-input frontiers can run ahead
+  of the actually simulated settled checkpoint.
+- RCNT read-only line levels are snapshot state: normal CPU register-write
+  semantics are insufficient for restore. Keep the RCNT regression when changing
+  SIO deserialization. The build glue explicitly tracks `src/gba/io.c` edits.
+- Inactive timing-event deadlines are stale storage, not pending events. Preserve
+  scheduled-event coverage and a regression for any diagnostic canonicalization.

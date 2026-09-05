@@ -1,0 +1,15 @@
+[package]
+name = "ss2-rollback-harness"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "ss2-local-link"
+path = "src/bin/local_link.rs"
+
+[dependencies]
+mgba-rollback = { path = "../mgba-rollback" }
+mgba = { path = "../mgba-rs" }
+minifb = "0.28"
+sha2 = "0.10"
