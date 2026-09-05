@@ -5,3 +5,5 @@
 *.sav
 /recordings/
 /app/*-phase4.log
+/dist/
+/app/*-netplay.log

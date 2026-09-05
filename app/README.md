@@ -1,5 +1,20 @@
 # SS2 harnesses
 
+## Portable internet test client
+
+`SS2-Netplay` is the native Host/Connect client. It embeds mGBA, uses direct-IP
+QUIC over UDP (default port 24872), and loads `ROM/` and `save/` relative to its
+EXE. See [PORTABLE_README.txt](PORTABLE_README.txt) for player instructions.
+
+Build with `./build-netplay.ps1`; run the app suite with
+`./build-netplay.ps1 -Test`; create the portable folder and ZIP with
+`./package-netplay.ps1`. These scripts are for development only. Players copy or
+extract the package and launch its EXE without compiling or installing mGBA.
+
+`SS2-Netplay.exe --self-test` runs a ROM-free real-QUIC rollback smoke test and
+writes `self-test.txt` beside the EXE. It does not test SS2 save menus. The user
+requested that actual in-game save/reload behavior remain a manual check.
+
 ## Phase 3 local cable frontend
 
 `ss2-local-link` opens two 2x GBA windows backed by one two-core cable `Link`.

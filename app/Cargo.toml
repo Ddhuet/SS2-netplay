@@ -8,8 +8,18 @@ publish = false
 name = "ss2-local-link"
 path = "src/bin/local_link.rs"
 
+[[bin]]
+name = "SS2-Netplay"
+path = "src/bin/netplay.rs"
+
 [dependencies]
 mgba-rollback = { path = "../mgba-rollback" }
 mgba = { path = "../mgba-rs" }
 minifb = "0.28"
 sha2 = "0.10"
+font8x8 = "0.3"
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros", "io-util", "net"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+rcgen = "0.13"
+cpal = "0.16"

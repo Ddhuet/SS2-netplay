@@ -24,6 +24,8 @@ mgba-rs/mgba-sys/mgba/
 
 notes/
     Documentation about the current project and architecture.
+recordings/
+    Heavy logs of recorded emulation + netplay.
 
 Initial priority:
 1. Preserve upstream tests.
