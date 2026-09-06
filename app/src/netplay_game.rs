@@ -16,6 +16,7 @@ pub const FRAME_RATE: f64 = 16_777_216.0 / 280_896.0;
 struct Checkpoint {
     hash: [u8; 32],
     save: Option<Vec<u8>>,
+    components: Arc<Vec<(String, Vec<u8>)>>,
 }
 #[derive(Default)]
 struct Observed {
@@ -31,10 +32,14 @@ impl TickObserver for Observer {
         if tick % 60 != 0 {
             return;
         }
-        let result = state_hash(link).map(|hash| Checkpoint {
-            hash,
-            save: link.export_save(self.player),
-        });
+        let result = link
+            .diagnostic_components()
+            .map_err(|e| e.to_string())
+            .map(|components| Checkpoint {
+                hash: component_hash(&components),
+                save: link.export_save(self.player),
+                components: Arc::new(components),
+            });
         let mut obs = self.shared.lock().unwrap();
         match result {
             Ok(value) => {
@@ -55,6 +60,60 @@ impl TickObserver for Observer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn desync_capture_preserves_exact_checkpoint_and_startup() {
+        let rom = mgba_rollback::testrom::build_idle();
+        let mut game = Game::new(&rom, &[None, None], 0).unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "ss2-capture-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let hello = crate::netplay_wire::Hello {
+            rom_hash: Sha256::digest(&rom).into(),
+            build_hash: [7; 32],
+            save: None,
+        };
+        game.enable_diagnostics(&root, &hello, &[None, None])
+            .unwrap();
+        game.receive(Message::Ready(game.initial_hash)).unwrap();
+        let checkpoint = Checkpoint {
+            hash: [1; 32],
+            save: None,
+            components: Arc::new(vec![("test/component".into(), vec![9, 8, 7])]),
+        };
+        game.last_matched = Some((0, checkpoint.clone()));
+        game.local_hashes.insert(60, checkpoint);
+        game.remote_hashes.insert(60, [2; 32]);
+        let error = game.synchronization().unwrap_err();
+        assert!(error.contains("DESYNC at settled frame 60"));
+        game.capture_failure(&error).unwrap();
+        let directory = std::fs::read_dir(root.join("logs"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(
+            std::fs::read(directory.join("settled-60/0.bin")).unwrap(),
+            vec![9, 8, 7]
+        );
+        assert_eq!(
+            std::fs::read(directory.join("matched-0/0.bin")).unwrap(),
+            vec![9, 8, 7]
+        );
+        let manifest = std::fs::read_to_string(directory.join("manifest.txt")).unwrap();
+        assert!(manifest.contains("save_0=absent"));
+        assert!(!directory.join("initial-player-0.sav").exists());
+        let events = std::fs::read_to_string(directory.join("events.txt")).unwrap();
+        assert!(events.contains("PENDING 60 local="));
+        assert!(events.contains("STOP frontier=0"));
+        drop(game);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn session_adapter_rejects_skips_duplicates_and_wrong_initial_state() {
         let rom = mgba_rollback::testrom::build_idle();
@@ -92,15 +151,21 @@ mod tests {
 }
 
 pub fn state_hash(link: &mut Link) -> Result<[u8; 32], String> {
+    Ok(component_hash(
+        &link.diagnostic_components().map_err(|e| e.to_string())?,
+    ))
+}
+
+fn component_hash(components: &[(String, Vec<u8>)]) -> [u8; 32] {
     let mut hash = Sha256::new();
     hash.update(b"ss2-netplay-diagnostics-v1");
-    for (name, bytes) in link.diagnostic_components().map_err(|e| e.to_string())? {
+    for (name, bytes) in components {
         hash.update((name.len() as u64).to_le_bytes());
         hash.update(name.as_bytes());
         hash.update((bytes.len() as u64).to_le_bytes());
         hash.update(bytes);
     }
-    Ok(hash.finalize().into())
+    hash.finalize().into()
 }
 
 pub struct Game {
@@ -120,6 +185,8 @@ pub struct Game {
     last_input: Instant,
     started: Instant,
     last_hash_match: Instant,
+    last_matched: Option<(u32, Checkpoint)>,
+    diagnostics: Option<crate::netplay_diagnostics::Capture>,
 }
 
 impl Game {
@@ -150,6 +217,8 @@ impl Game {
             last_input: Instant::now(),
             started: Instant::now(),
             last_hash_match: Instant::now(),
+            last_matched: None,
+            diagnostics: None,
         };
         game.session.set_observer(Some(Box::new(Observer {
             shared: observed,
@@ -159,6 +228,9 @@ impl Game {
     }
 
     pub fn receive(&mut self, message: Message) -> Result<(), String> {
+        if let Some(capture) = &mut self.diagnostics {
+            capture.record(&format!("RECEIVE {} {message:?}", self.session.frontier()))?;
+        }
         match message {
             Message::Ready(hash) => {
                 if self.ready {
@@ -224,6 +296,9 @@ impl Game {
     }
 
     pub fn advance(&mut self, keys: u32) -> Result<Message, String> {
+        if let Some(capture) = &mut self.diagnostics {
+            capture.record(&format!("ADVANCE {} {keys}", self.session.frontier()))?;
+        }
         if self.session.frontier() >= u32::MAX - 1024 {
             return Err("Session duration limit reached".into());
         }
@@ -265,6 +340,9 @@ impl Game {
                 .checkpoints
                 .remove(&tick)
                 .ok_or_else(|| format!("Missing settled observation at {tick}"))?;
+            if let Some(capture) = &mut self.diagnostics {
+                capture.hashes(tick, &value.components)?;
+            }
             outgoing.push(Message::Hash {
                 tick,
                 hash: value.hash,
@@ -289,11 +367,58 @@ impl Game {
                 ));
             }
             save = local.save.clone();
+            self.last_matched = Some((tick, local.clone()));
             self.local_hashes.remove(&tick);
             self.remote_hashes.remove(&tick);
             self.matched_hash_tick = tick;
             self.last_hash_match = Instant::now();
         }
         Ok((outgoing, save))
+    }
+
+    pub fn enable_diagnostics(
+        &mut self,
+        root: &std::path::Path,
+        hello: &crate::netplay_wire::Hello,
+        saves: &[Option<Vec<u8>>; 2],
+    ) -> Result<(), String> {
+        let mut capture = crate::netplay_diagnostics::Capture::new(
+            root,
+            hello,
+            saves,
+            self.player,
+            self.initial_hash,
+        )?;
+        let components = self
+            .session
+            .with_link(|link| link.diagnostic_components())
+            .map_err(|e| e.to_string())?;
+        capture.dump(0, "initial", &components)?;
+        self.diagnostics = Some(capture);
+        Ok(())
+    }
+
+    pub fn capture_failure(&mut self, reason: &str) -> Result<(), String> {
+        let Some(capture) = &mut self.diagnostics else {
+            return Ok(());
+        };
+        capture.record(&format!("STOP frontier={} settled={} matched={} remote_next={} corrections={} max_depth={} reason={reason}", self.session.frontier(), self.session.checkpoint().map(|(t,_)|t).unwrap_or(0), self.matched_hash_tick, self.next_remote, self.corrections, self.max_depth))?;
+        if let Some((tick, checkpoint)) = &self.last_matched {
+            capture.dump(*tick, "matched", &checkpoint.components)?;
+        }
+        for (tick, checkpoint) in &self.local_hashes {
+            capture.record(&format!(
+                "PENDING {tick} local={:x?} remote={:x?}",
+                checkpoint.hash,
+                self.remote_hashes.get(tick)
+            ))?;
+            capture.dump(*tick, "settled", &checkpoint.components)?;
+        }
+        // These observations may still be speculative. Label them explicitly:
+        // a peer can disconnect before this side releases its settled hash.
+        for (tick, checkpoint) in &self.observed.lock().unwrap().checkpoints {
+            capture.dump(*tick, "observed", &checkpoint.components)?;
+        }
+        Ok(())
     }
 }

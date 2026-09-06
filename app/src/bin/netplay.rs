@@ -208,10 +208,15 @@ fn run(root: &Path) -> Result<(), String> {
                             if game.is_some() {
                                 return Err("Duplicate connection".into());
                             }
-                            let active = Game::new(
+                            let mut active = Game::new(
                                 &files.as_ref().ok_or("No local files")?.rom,
                                 &saves,
                                 local_player,
+                            )?;
+                            active.enable_diagnostics(
+                                root,
+                                &files.as_ref().ok_or("No local files")?.hello,
+                                &saves,
                             )?;
                             send(network, Message::Ready(active.initial_hash))?;
                             writeln!(
@@ -334,6 +339,12 @@ fn run(root: &Path) -> Result<(), String> {
             Ok(())
         })();
         if let Err(e) = step {
+            if let Some(active) = &mut game {
+                if let Err(capture_error) = active.capture_failure(&e) {
+                    writeln!(log, "CAPTURE FAILED {capture_error}")
+                        .map_err(|err| err.to_string())?;
+                }
+            }
             writeln!(log, "STOP {e}").map_err(|err| err.to_string())?;
             log.flush().map_err(|err| err.to_string())?;
             // Keep the complete reason accessible even when it is longer than

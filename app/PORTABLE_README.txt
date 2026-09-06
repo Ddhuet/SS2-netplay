@@ -77,6 +77,16 @@ the host before removing the corresponding pin file and retrying. Do not include
 your generated config, save, or logs folders when sharing a fresh copy publicly.
 
 PORTABILITY / DIAGNOSTICS
+Each connection creates logs/capture-<time>-p<seat>. It contains both initial
+save images (or explicit absent markers), ROM/build identity, timed receive and
+advance events, and component hashes at settled 60-frame checkpoints. On a
+handled session failure it also writes the last matching and pending checkpoint
+component bytes. These are diagnostic bytes, not loadable mGBA savestates.
+If another failure occurs, keep the capture folders AND session text logs from
+BOTH PCs, plus the exact EXE used. Captures contain private save data; share them
+only with whoever is investigating. No ROM is copied. A native process crash
+cannot run the failure dumper; regularly flushed hashes/events remain available.
+
 Keep the included DLLs beside the EXE. They are the Microsoft C/C++ runtime files;
 other loaded system libraries ship with Windows 10/11. Sources.zip contains the
 current emulator, wrappers, rollback engine, and harness source. licenses contains
