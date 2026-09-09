@@ -103,3 +103,6 @@ Phase 4 guidance:
   SIO deserialization. The build glue explicitly tracks `src/gba/io.c` edits.
 - Inactive timing-event deadlines are stale storage, not pending events. Preserve
   scheduled-event coverage and a regression for any diagnostic canonicalization.
+- Video `stallMask` is latched CPU bus-timing state, including zero during
+  VBlank, not merely renderer output. Preserve it in rollback snapshots and
+  diagnostics; retain the VBlank and mid-scanline contention regressions.

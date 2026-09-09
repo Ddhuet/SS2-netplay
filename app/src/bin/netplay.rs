@@ -131,6 +131,7 @@ fn run(root: &Path) -> Result<(), String> {
     if std::env::args().any(|arg| arg == "--ui-preview") {
         ui.show_setup("Listening on UDP port 24872. Forward this UDP port to this computer. Waiting for your friend to connect.", true)?;
         ui.write_preview(&root.join("setup-preview.bmp"))?;
+        ui.write_exit_preview(&root.join("exit-preview.bmp"))?;
         return Ok(());
     }
     fs::create_dir_all(root.join("ROM")).map_err(|e| e.to_string())?;

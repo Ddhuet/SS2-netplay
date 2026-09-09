@@ -97,6 +97,54 @@ impl Rect {
     }
 }
 
+#[derive(Default)]
+struct ExitPrompt {
+    open: bool,
+    mouse_armed: bool,
+}
+
+const EXIT_YES: Rect = Rect {
+    x: 385,
+    y: 258,
+    width: 180,
+    height: 48,
+};
+const EXIT_NO: Rect = Rect {
+    x: 155,
+    y: 258,
+    width: 200,
+    height: 48,
+};
+
+impl ExitPrompt {
+    // Only a fresh mouse press after opening may confirm. Keyboard input is
+    // consumed by the caller while open; the network loop continues running.
+    fn update(&mut self, escape: bool, mouse_down: bool, position: Option<(f32, f32)>) -> bool {
+        if escape {
+            self.open = !self.open;
+            self.mouse_armed = false;
+            return false;
+        }
+        if !self.open {
+            return false;
+        }
+        if !mouse_down {
+            self.mouse_armed = true;
+        } else if self.mouse_armed {
+            self.mouse_armed = false;
+            if let Some((x, y)) = position {
+                if EXIT_YES.contains(x, y) {
+                    return true;
+                }
+                if EXIT_NO.contains(x, y) {
+                    self.open = false;
+                }
+            }
+        }
+        false
+    }
+}
+
 /// The native minifb window used by the netplay frontend.
 ///
 /// The window owns a 720x480 RGB buffer. Setup is drawn directly into that
@@ -113,6 +161,7 @@ pub struct Ui {
     busy: bool,
     mouse_was_down: bool,
     quit_reported: bool,
+    exit_prompt: ExitPrompt,
     local_status: Option<String>,
 }
 
@@ -143,6 +192,7 @@ impl Ui {
             busy: false,
             mouse_was_down: false,
             quit_reported: false,
+            exit_prompt: ExitPrompt::default(),
             local_status: None,
         })
     }
@@ -158,19 +208,25 @@ impl Ui {
         // changes before we inspect the input queues.
         if !self.window.is_active() {
             self.mouse_was_down = false;
+            self.exit_prompt.mouse_armed = false;
             return None;
         }
 
         let pressed = self.window.get_keys_pressed(KeyRepeat::Yes);
         let just_pressed = self.window.get_keys_pressed(KeyRepeat::No);
-        if just_pressed.contains(&Key::Escape) {
-            return self.report_quit();
-        }
-
         let mouse_position = self.window.get_mouse_pos(MouseMode::Discard);
         let mouse_down = self.window.get_mouse_down(MouseButton::Left);
         let clicked = mouse_down && !self.mouse_was_down;
         self.mouse_was_down = mouse_down;
+
+        let was_open = self.exit_prompt.open;
+        let escape = just_pressed.contains(&Key::Escape);
+        if self.exit_prompt.update(escape, mouse_down, mouse_position) {
+            return self.report_quit();
+        }
+        if was_open || self.exit_prompt.open || escape {
+            return None;
+        }
 
         if self.screen != Screen::Setup {
             return None;
@@ -353,7 +409,7 @@ impl Ui {
             &mut self.buffer,
             80,
             442,
-            "Escape or the window close button quits cleanly.",
+            "Escape asks before quitting. Closing the window exits.",
             MUTED_TEXT,
             1,
         );
@@ -397,7 +453,7 @@ impl Ui {
 
     /// Return the GBA button mask while this window has focus.
     pub fn keys(&mut self) -> u32 {
-        if !self.window.is_open() || !self.window.is_active() {
+        if self.exit_prompt.open || !self.window.is_open() || !self.window.is_active() {
             return 0;
         }
 
@@ -410,6 +466,13 @@ impl Ui {
     /// Whether the native window still exists.
     pub fn is_open(&self) -> bool {
         self.window.is_open()
+    }
+
+    /// Capture the exact rendered pixels for build-time visual inspection.
+    pub fn write_exit_preview(&mut self, path: &std::path::Path) -> Result<(), String> {
+        self.exit_prompt.open = true;
+        self.present()?;
+        self.write_preview(path)
     }
 
     /// Capture the exact rendered pixels for build-time visual inspection.
@@ -437,6 +500,42 @@ impl Ui {
     }
 
     fn present(&mut self) -> Result<(), String> {
+        if self.exit_prompt.open {
+            let panel = Rect {
+                x: 115,
+                y: 152,
+                width: 490,
+                height: 184,
+            };
+            fill_rect(&mut self.buffer, panel, PANEL);
+            stroke_rect(&mut self.buffer, panel, 0x7596b8);
+            draw_text(
+                &mut self.buffer,
+                150,
+                179,
+                "Are you sure you want to exit?",
+                0xffffff,
+                1,
+            );
+            draw_text(
+                &mut self.buffer,
+                150,
+                205,
+                "The session keeps running while this is open.",
+                0xb9c8d8,
+                1,
+            );
+            draw_text(
+                &mut self.buffer,
+                150,
+                226,
+                "Click Yes to exit. Escape cancels.",
+                0xb9c8d8,
+                1,
+            );
+            draw_button(&mut self.buffer, EXIT_NO, "Keep playing", true, false);
+            draw_button(&mut self.buffer, EXIT_YES, "Yes, exit", true, false);
+        }
         self.window
             .update_with_buffer(&self.buffer, WINDOW_WIDTH, WINDOW_HEIGHT)
             .map_err(|error| format!("failed to present netplay window: {error}"))
@@ -516,6 +615,47 @@ impl Ui {
                 5,
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod exit_prompt_tests {
+    use super::*;
+
+    #[test]
+    fn escape_cancels_and_keyboard_alone_never_confirms() {
+        let mut prompt = ExitPrompt::default();
+        assert!(!prompt.update(true, false, None));
+        assert!(prompt.open);
+        // Keyboard keys other than Escape have no route to confirmation.
+        for _ in 0..10 {
+            assert!(!prompt.update(false, false, Some((400.0, 280.0))));
+        }
+        assert!(!prompt.update(true, false, None));
+        assert!(!prompt.open);
+    }
+
+    #[test]
+    fn confirmation_requires_release_then_click_inside_yes() {
+        let mut prompt = ExitPrompt::default();
+        let yes = Some((400.0, 280.0));
+        assert!(!prompt.update(true, true, yes));
+        assert!(!prompt.update(false, true, yes));
+        assert!(!prompt.update(false, false, yes));
+        // Clicking elsewhere then dragging onto Yes must not confirm either.
+        assert!(!prompt.update(false, true, Some((0.0, 0.0))));
+        assert!(!prompt.update(false, true, yes));
+        assert!(!prompt.update(false, false, yes));
+        assert!(prompt.update(false, true, yes));
+    }
+
+    #[test]
+    fn keep_playing_click_closes_prompt() {
+        let mut prompt = ExitPrompt::default();
+        prompt.update(true, false, None);
+        prompt.update(false, false, None);
+        assert!(!prompt.update(false, true, Some((170.0, 280.0))));
+        assert!(!prompt.open);
     }
 }
 

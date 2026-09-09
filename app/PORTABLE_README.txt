@@ -25,7 +25,9 @@ manual. Networks behind carrier-grade NAT need an actual reachable public IP.
 CONTROLS (same on both computers)
 Arrows = D-pad       Z = A       X = B
 Enter = Start       Right Shift = Select       C = L       V = R
-Escape or close window = end this session and quit
+Escape = exit confirmation; click Yes with the mouse to quit. Escape cancels.
+  The session keeps running while the prompt is open; game buttons are released.
+  Closing the window ends the session immediately.
 Keyboard input releases when the game window loses focus. There is no controller
 mapping UI yet. Select the in-game language and menus normally.
 
@@ -77,6 +79,11 @@ the host before removing the corresponding pin file and retrying. Do not include
 your generated config, save, or logs folders when sharing a fresh copy publicly.
 
 PORTABILITY / DIAGNOSTICS
+This build preserves video-memory contention timing across rollback restores,
+fixing the reproduced shop-session desync. Both players must use the same EXE.
+Automatic recovery is not implemented; a desync still preserves evidence and
+stops the session.
+
 Each connection creates logs/capture-<time>-p<seat>. It contains both initial
 save images (or explicit absent markers), ROM/build identity, timed receive and
 advance events, and component hashes at settled 60-frame checkpoints. On a
