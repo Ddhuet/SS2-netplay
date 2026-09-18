@@ -5,3 +5,4 @@ pub mod netplay_audio;
 pub mod netplay_game;
 pub mod netplay_diagnostics;
 pub mod netplay_selftest;
+pub mod netplay_stats;

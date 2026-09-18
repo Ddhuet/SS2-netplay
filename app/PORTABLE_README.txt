@@ -8,6 +8,9 @@ GET STARTED
    computer. Both players must use identical ROM bytes and this same EXE build.
    ROMs and personal saves are not included.
 3. Launch SS2-Netplay.exe on both computers.
+   Choose local delay 1, 2, 3, or 4 frames before Host/Connect (default 2).
+   Higher delay trades response speed for fewer visible prediction corrections.
+   Each player chooses independently; the setting stays fixed during the session.
 4. One player clicks HOST. The default port is 24872, and it can be changed in
    the Port field before hosting. Forward that UDP port on the host's router to
    the host computer. Allow the harness through Windows Firewall if prompted.
@@ -25,11 +28,23 @@ manual. Networks behind carrier-grade NAT need an actual reachable public IP.
 CONTROLS (same on both computers)
 Arrows = D-pad       Z = A       X = B
 Enter = Start       Right Shift = Select       C = L       V = R
+F1 = toggle live statistics (white panel, red text).
 Escape = exit confirmation; click Yes with the mouse to quit. Escape cancels.
   The session keeps running while the prompt is open; game buttons are released.
   Closing the window ends the session immediately.
 Keyboard input releases when the game window loses focus. There is no controller
 mapping UI yet. Select the in-game language and menus normally.
+
+LIVE STATISTICS
+Ping is QUIC's smoothed round-trip time, not one-way input travel time.
+Game FPS counts forward session frames over 500 ms, not redraws or rollback work.
+Rollback counts count correction events; depth is in frames. Last depth is the
+most recent correction in the past minute, and max is the session maximum.
+Recommended delay is advisory only: after a five-second warmup, use the last
+10 seconds' 95th-percentile input lead minus two frames of allowed prediction,
+clamped to 1-4. This heuristic does not guarantee smooth play or change settings.
+"High lateness" means that estimate exceeds four frames. Connection spikes or
+slow emulation can still cause waiting. Statistics reset on each new connection.
 
 SAVES
 Start with an empty save folder. Creating a character and using the game's own

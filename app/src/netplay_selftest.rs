@@ -62,6 +62,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     let mut pending: [VecDeque<(Instant, Message)>; 2] = Default::default();
     let start = Instant::now();
     let mut next_tick = [Instant::now(); 2];
+    let mut rtt_received = [false; 2];
     loop {
         if start.elapsed() > Duration::from_secs(25) {
             return Err(format!(
@@ -81,7 +82,9 @@ pub fn run(root: &Path) -> Result<String, String> {
                         if local_player != p {
                             return Err("Incorrect seat assignment".into());
                         }
-                        let game = Game::new(&rom, &saves, p)?;
+                        let mut game = Game::new(&rom, &saves, p)?;
+                        // Exercise unequal endpoint settings at both UI limits.
+                        game.session.set_present_delay(if p == 0 { 1 } else { 4 });
                         wires[p]
                             .tx
                             .try_send(Message::Ready(game.initial_hash))
@@ -92,13 +95,14 @@ pub fn run(root: &Path) -> Result<String, String> {
                         // Delayed application delivery exercises rollback on the
                         // same wire messages used by the playable harness.
                         let delay = if matches!(message, Message::Input { .. }) {
-                            Duration::from_millis(55)
+                            Duration::from_millis(85)
                         } else {
                             Duration::ZERO
                         };
                         pending[p].push_back((Instant::now() + delay, message));
                     }
                     Event::Error(e) => return Err(e),
+                    Event::Rtt(rtt) => rtt_received[p] |= !rtt.is_zero(),
                     Event::Status(_) => {}
                 }
             }
@@ -151,14 +155,22 @@ pub fn run(root: &Path) -> Result<String, String> {
         std::thread::sleep(Duration::from_millis(1));
     }
     let mut summary = "PASS: two real QUIC endpoints; both peers matched the direct synthetic-ROM baseline at all six checkpoints through frame 360; all confirmed input rows ordered correctly.\n".to_string();
+    if !rtt_received.iter().all(|received| *received) {
+        return Err("Missing live RTT telemetry".into());
+    }
+    summary.push_str(
+        "Both endpoints reported live RTT; input delivery included 85 ms artificial delay.\n",
+    );
     for (p, game) in games.iter().enumerate() {
         let game = game.as_ref().unwrap();
         if game.corrections == 0 {
             return Err(format!("No corrections exercised on peer {p}"));
         }
         summary.push_str(&format!(
-            "Peer {p}: {} corrections, maximum depth {}.\n",
-            game.corrections, game.max_depth
+            "Peer {p}: delay {} frames, {} corrections, maximum depth {}.\n",
+            game.session.present_delay(),
+            game.corrections,
+            game.max_depth
         ));
         let _ = wires[p].tx.try_send(Message::Leave);
     }

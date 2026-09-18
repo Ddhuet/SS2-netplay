@@ -33,8 +33,33 @@ to their manual test. No automated SS2 menu/save sequence was run for this work.
 
 Startup, input, and control use one bounded reliable QUIC stream. Bulk transfer
 ends before gameplay; separate traffic streams and datagram redundancy remain
-future optimization work. There is no RTT display yet, invitation/password input,
+future optimization work. There is no invitation/password input,
 coordinated pause, gamepad mapping, or advanced lobby.
+
+## September 18: local delay and F1 telemetry
+
+Setup now offers local present delay 1-4 (default 2), frozen when hosting or
+connecting starts. The peer need not choose the same value. No wire protocol or
+shared simulation configuration changes are needed for this local setting.
+
+F1 toggles a white/red game overlay. The worker samples Quinn's transport RTT
+every 250 ms using expendable local events; these are not new wire messages.
+The game reports forward-advance FPS over 500 ms, correction counts (session and
+rolling 60 seconds), recent/max depth, prediction, input queue, waiting status,
+and last matching hash boundary. Rollback replays and window redraws do not count
+as forward FPS. Rolling histories age out even while input advancement stalls.
+
+The final recommendation is advisory: after five seconds and at least 60 recent
+samples, take the 95th percentile of pre-advance unmatched lead plus the newly
+sampled local input over ten seconds, subtract two tolerated prediction frames,
+and clamp to 1-4. A result above four is labelled high lateness. This is a simple
+heuristic, not an optimality guarantee; it does not change the selected delay.
+All session statistics reset on a new connection.
+
+The synthetic real-QUIC self-test exercises unequal 1/4-frame delays with 85 ms
+artificial input delivery delay, checking both peers against the direct baseline
+and requiring rollback corrections plus live RTT telemetry. No automated SS2
+in-game save-persistence check is introduced.
 
 The minimal UI uses first-connection trust with certificate pinning by host
 IP/port on later connects. Host identity persists under `config`; guest identity

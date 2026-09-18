@@ -94,6 +94,8 @@ pub enum Message {
 /// Events delivered by the transport worker.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Event {
+    /// Smoothed transport round-trip time; telemetry is expendable.
+    Rtt(Duration),
     Status(String),
     Connected {
         local_player: usize,
@@ -627,9 +629,13 @@ async fn run_stream(
         Ok::<(), String>(())
     });
 
+    let mut telemetry = tokio::time::interval(Duration::from_millis(250));
     let result = async {
         loop {
             tokio::select! {
+                _ = telemetry.tick() => {
+                    let _ = event_tx.try_send(Event::Rtt(connection.rtt()));
+                }
                 result = &mut reader => return result.map_err(|e| e.to_string())?,
                 _ = tokio::time::sleep(Duration::from_millis(1)) => {
                     for _ in 0..64 {

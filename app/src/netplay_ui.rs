@@ -1,4 +1,5 @@
 use std::net::{IpAddr, SocketAddr};
+use std::path::Path;
 use std::str::FromStr;
 
 use font8x8::{UnicodeFonts, BASIC_FONTS};
@@ -27,6 +28,7 @@ const ACCENT_DARK: u32 = 0x1d5c61;
 const BUTTON: u32 = 0x16505a;
 const BUTTON_HOVER: u32 = 0x217477;
 const BUTTON_DISABLED: u32 = 0x253746;
+const BUTTON_SELECTED_DISABLED: u32 = 0x354957;
 const ERROR: u32 = 0xffa07a;
 
 const IP_FIELD: Rect = Rect {
@@ -52,6 +54,12 @@ const CONNECT_BUTTON: Rect = Rect {
     y: 250,
     width: 220,
     height: 48,
+};
+const DELAY_SELECTOR: Rect = Rect {
+    x: 420,
+    y: 184,
+    width: 220,
+    height: 38,
 };
 const STATUS_PANEL: Rect = Rect {
     x: 80,
@@ -116,6 +124,12 @@ const EXIT_NO: Rect = Rect {
     height: 48,
 };
 
+const DEFAULT_LOCAL_DELAY: u32 = 2;
+const DEBUG_BACKGROUND: u32 = 0xffffff;
+const DEBUG_TEXT: u32 = 0xb00000;
+const DEBUG_MAX_COLUMNS: usize = 46;
+const DEBUG_MAX_LINES: usize = 12;
+
 impl ExitPrompt {
     // Only a fresh mouse press after opening may confirm. Keyboard input is
     // consumed by the caller while open; the network loop continues running.
@@ -163,6 +177,9 @@ pub struct Ui {
     quit_reported: bool,
     exit_prompt: ExitPrompt,
     local_status: Option<String>,
+    local_delay: u32,
+    debug_visible: bool,
+    debug_lines: Vec<String>,
 }
 
 impl Ui {
@@ -194,6 +211,9 @@ impl Ui {
             quit_reported: false,
             exit_prompt: ExitPrompt::default(),
             local_status: None,
+            local_delay: DEFAULT_LOCAL_DELAY,
+            debug_visible: false,
+            debug_lines: Vec::new(),
         })
     }
 
@@ -226,6 +246,10 @@ impl Ui {
         }
         if was_open || self.exit_prompt.open || escape {
             return None;
+        }
+
+        if self.screen == Screen::Game && just_pressed.contains(&Key::F1) {
+            self.debug_visible = !self.debug_visible;
         }
 
         if self.screen != Screen::Setup {
@@ -277,6 +301,8 @@ impl Ui {
                     self.focus = Focus::Port;
                     self.port_cursor =
                         cursor_from_mouse(&self.port, x, PORT_FIELD.x, PORT_FIELD.width);
+                } else if DELAY_SELECTOR.contains(x, y) && !self.busy {
+                    self.local_delay = delay_from_mouse(x);
                 } else if HOST_BUTTON.contains(x, y) {
                     return self.host_action();
                 } else if CONNECT_BUTTON.contains(x, y) {
@@ -370,6 +396,20 @@ impl Ui {
             &self.port,
             self.focus == Focus::Port,
             self.port_cursor,
+        );
+        draw_text(
+            &mut self.buffer,
+            DELAY_SELECTOR.x,
+            DELAY_SELECTOR.y.saturating_sub(10),
+            "DELAY (FRAMES)",
+            MUTED_TEXT,
+            1,
+        );
+        draw_delay_selector(
+            &mut self.buffer,
+            DELAY_SELECTOR,
+            self.local_delay,
+            !self.busy,
         );
 
         draw_button(&mut self.buffer, HOST_BUTTON, "HOST", !self.busy, false);
@@ -468,6 +508,62 @@ impl Ui {
         self.window.is_open()
     }
 
+    /// Return the local input delay selected on the setup screen.
+    pub fn selected_delay(&self) -> u32 {
+        self.local_delay
+    }
+
+    /// Replace the lines shown by the optional in-game diagnostics overlay.
+    pub fn set_debug_lines(&mut self, lines: Vec<String>) {
+        self.debug_lines = lines;
+    }
+
+    /// Capture a representative in-game diagnostics overlay for build-time
+    /// visual inspection without changing the current screen or exit prompt.
+    pub fn write_debug_preview(&mut self, path: &Path) -> Result<(), String> {
+        let previous_buffer = self.buffer.clone();
+        let previous_screen = self.screen;
+        let previous_debug_visible = self.debug_visible;
+        let previous_debug_lines = self.debug_lines.clone();
+        let previous_exit_open = self.exit_prompt.open;
+        let previous_mouse_armed = self.exit_prompt.mouse_armed;
+
+        self.screen = Screen::Game;
+        self.debug_visible = true;
+        self.debug_lines = vec![
+            "NETPLAY STATS - F1 hides".to_owned(),
+            "Ping RTT: 200.0 ms".to_owned(),
+            "Game FPS (500ms): 59.7".to_owned(),
+            "Delay: 4 frames".to_owned(),
+            "Rollbacks total: 3".to_owned(),
+            "Rollbacks last 60s: 1".to_owned(),
+            "Depth last / max: 4 / 8".to_owned(),
+            "Prediction: 3 frames".to_owned(),
+            "Input queue: 6 / 10".to_owned(),
+            "Waiting for inputs: No".to_owned(),
+            "Synced frame: 1200".to_owned(),
+            "Recommended delay: 4 frames (high lateness)".to_owned(),
+        ];
+        // The exit modal must not obscure the preview overlay, even when a
+        // caller captures a preview while the real prompt is open.
+        self.exit_prompt.open = false;
+        self.exit_prompt.mouse_armed = false;
+
+        let result = (|| {
+            let frame = debug_preview_frame();
+            self.show_game(&frame, "SS2 | Debug preview")?;
+            self.write_preview(path)
+        })();
+
+        self.buffer = previous_buffer;
+        self.screen = previous_screen;
+        self.debug_visible = previous_debug_visible;
+        self.debug_lines = previous_debug_lines;
+        self.exit_prompt.open = previous_exit_open;
+        self.exit_prompt.mouse_armed = previous_mouse_armed;
+        result
+    }
+
     /// Capture the exact rendered pixels for build-time visual inspection.
     pub fn write_exit_preview(&mut self, path: &std::path::Path) -> Result<(), String> {
         self.exit_prompt.open = true;
@@ -500,6 +596,9 @@ impl Ui {
     }
 
     fn present(&mut self) -> Result<(), String> {
+        if self.screen == Screen::Game && self.debug_visible {
+            draw_debug_overlay(&mut self.buffer, &self.debug_lines);
+        }
         if self.exit_prompt.open {
             let panel = Rect {
                 x: 115,
@@ -775,6 +874,22 @@ fn expand_5_bit(value: u32) -> u32 {
     (value << 3) | (value >> 2)
 }
 
+fn debug_preview_frame() -> Vec<u8> {
+    let mut frame = vec![0u8; GBA_WIDTH * GBA_HEIGHT * 2];
+    for y in 0..GBA_HEIGHT {
+        for x in 0..GBA_WIDTH {
+            let tile = ((x / 24) + (y / 16)) % 2;
+            let red = ((x * 31) / GBA_WIDTH).min(31) as u16;
+            let green = ((y * 31) / GBA_HEIGHT).min(31) as u16;
+            let blue = if tile == 0 { 10 } else { 20 };
+            let pixel = red | (green << 5) | (blue << 10);
+            let offset = (y * GBA_WIDTH + x) * 2;
+            frame[offset..offset + 2].copy_from_slice(&pixel.to_ne_bytes());
+        }
+    }
+    frame
+}
+
 fn fill_rect(buffer: &mut [u32], rect: Rect, color: u32) {
     let max_y = (rect.y + rect.height).min(WINDOW_HEIGHT);
     let max_x = (rect.x + rect.width).min(WINDOW_WIDTH);
@@ -863,6 +978,103 @@ fn draw_button(buffer: &mut [u32], rect: Rect, label: &str, enabled: bool, hover
     let text_x = rect.x + rect.width.saturating_sub(text_width) / 2;
     let text_color = if enabled { TEXT } else { MUTED_TEXT };
     draw_text(buffer, text_x, rect.y + 20, label, text_color, 1);
+}
+
+fn draw_delay_selector(buffer: &mut [u32], rect: Rect, selected: u32, enabled: bool) {
+    for (index, delay) in (1..=4).enumerate() {
+        let segment = delay_segment_rect(rect, index);
+        let fill = if !enabled {
+            if delay == selected {
+                BUTTON_SELECTED_DISABLED
+            } else {
+                BUTTON_DISABLED
+            }
+        } else if delay == selected {
+            ACCENT_DARK
+        } else {
+            BUTTON
+        };
+        fill_rect(buffer, segment, fill);
+        stroke_rect(buffer, segment, if enabled { ACCENT } else { ACCENT_DARK });
+
+        let label = delay.to_string();
+        let text_width = label.len() * 8;
+        let text_x = segment.x + segment.width.saturating_sub(text_width) / 2;
+        let text_color = if enabled { TEXT } else { MUTED_TEXT };
+        draw_text(buffer, text_x, segment.y + 15, &label, text_color, 1);
+    }
+}
+
+fn delay_segment_rect(rect: Rect, index: usize) -> Rect {
+    let segment_width = rect.width / 4;
+    let x = rect.x + segment_width * index;
+    let width = if index == 3 {
+        rect.width - segment_width * 3
+    } else {
+        segment_width
+    };
+    Rect {
+        x,
+        y: rect.y,
+        width,
+        height: rect.height,
+    }
+}
+
+fn delay_from_mouse(x: f32) -> u32 {
+    let segment_width = DELAY_SELECTOR.width as f32 / 4.0;
+    let index = ((x - DELAY_SELECTOR.x as f32) / segment_width)
+        .floor()
+        .clamp(0.0, 3.0) as u32;
+    index + 1
+}
+
+fn draw_debug_overlay(buffer: &mut [u32], lines: &[String]) {
+    let mut display_lines = Vec::new();
+    for line in lines {
+        for part in line.split('\n') {
+            let clipped = part.chars().take(DEBUG_MAX_COLUMNS).collect::<String>();
+            display_lines.push(if clipped.is_empty() {
+                " ".to_owned()
+            } else {
+                clipped
+            });
+            if display_lines.len() == DEBUG_MAX_LINES {
+                break;
+            }
+        }
+        if display_lines.len() == DEBUG_MAX_LINES {
+            break;
+        }
+    }
+    if display_lines.is_empty() {
+        display_lines.push("DEBUG ON".to_owned());
+    }
+
+    let max_chars = display_lines
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(8);
+    let rect = Rect {
+        x: 8,
+        y: 8,
+        width: (max_chars + 2) * 8,
+        height: display_lines.len() * 10 + 8,
+    };
+    fill_rect(buffer, rect, DEBUG_BACKGROUND);
+    stroke_rect(buffer, rect, DEBUG_TEXT);
+    for (index, line) in display_lines.iter().enumerate() {
+        draw_text(
+            buffer,
+            rect.x + 8,
+            rect.y + 4 + index * 10,
+            line,
+            DEBUG_TEXT,
+            1,
+        );
+    }
 }
 
 fn draw_status(

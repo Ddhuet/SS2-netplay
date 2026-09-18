@@ -4,6 +4,7 @@ use sha2::{Digest, Sha256};
 use ss2_rollback_harness::{
     netplay_audio::Audio,
     netplay_game::{Game, FRAME_RATE},
+    netplay_stats::Stats,
     netplay_ui::{Action, Ui},
     netplay_wire::{self, Event, Hello, Message, Wire},
 };
@@ -132,6 +133,7 @@ fn run(root: &Path) -> Result<(), String> {
         ui.show_setup("Listening on UDP port 24872. Forward this UDP port to this computer. Waiting for your friend to connect.", true)?;
         ui.write_preview(&root.join("setup-preview.bmp"))?;
         ui.write_exit_preview(&root.join("exit-preview.bmp"))?;
+        ui.write_debug_preview(&root.join("debug-preview.bmp"))?;
         return Ok(());
     }
     fs::create_dir_all(root.join("ROM")).map_err(|e| e.to_string())?;
@@ -157,6 +159,7 @@ fn run(root: &Path) -> Result<(), String> {
     let mut title = String::new();
     let mut save_candidate: Option<(Vec<u8>, u32)> = None;
     let mut last_saved = false;
+    let mut stats = Stats::new(Instant::now());
     loop {
         if let Some(action) = ui.poll() {
             match action {
@@ -214,6 +217,10 @@ fn run(root: &Path) -> Result<(), String> {
                                 &saves,
                                 local_player,
                             )?;
+                            active.session.set_present_delay(ui.selected_delay());
+                            stats = Stats::new(Instant::now());
+                            writeln!(log, "LOCAL present_delay={}", ui.selected_delay())
+                                .map_err(|e| e.to_string())?;
                             active.enable_diagnostics(
                                 root,
                                 &files.as_ref().ok_or("No local files")?.hello,
@@ -248,6 +255,7 @@ fn run(root: &Path) -> Result<(), String> {
                                 .receive(message)?;
                         }
                         Ok(Event::Error(e)) => return Err(e),
+                        Ok(Event::Rtt(rtt)) => stats.rtt = Some(rtt),
                         Err(TryRecvError::Empty) => break,
                         Err(TryRecvError::Disconnected) => return Err("Connection closed".into()),
                     }
@@ -256,7 +264,13 @@ fn run(root: &Path) -> Result<(), String> {
                     if active.can_advance() && Instant::now() >= deadline {
                         let slowdown = throttle
                             .step(active.session.skew(), active.session.speculation_balance());
+                        let lead = active
+                            .session
+                            .local_queue_length()
+                            .saturating_sub(active.session.matchable())
+                            + 1;
                         let message = active.advance(ui.keys())?;
+                        stats.advance(Instant::now(), active.last_depth, lead);
                         send(network, message)?;
                         for (tick, row) in active.session.drain_confirmed() {
                             writeln!(log, "INPUT {tick} {} {}", row[0], row[1])
@@ -306,6 +320,7 @@ fn run(root: &Path) -> Result<(), String> {
                     }
                     if active.ready {
                         if last_title.elapsed() >= Duration::from_millis(250) {
+                            ui.set_debug_lines(stats.lines(Instant::now(), active));
                             title = format!(
                                 "SS2 | Player {} | {} | rollback {} | synced {}{}{}",
                                 active.player + 1,
