@@ -2,8 +2,9 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::str::FromStr;
 
+use crate::netplay_controls::{Binding, Controllers, ACTION_NAMES};
+use crate::netplay_preferences::Preferences;
 use font8x8::{UnicodeFonts, BASIC_FONTS};
-use mgba::input::keys;
 use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Scale, ScaleMode, Window, WindowOptions};
 
 const WINDOW_WIDTH: usize = 720;
@@ -129,6 +130,32 @@ const DEBUG_BACKGROUND: u32 = 0xffffff;
 const DEBUG_TEXT: u32 = 0xb00000;
 const DEBUG_MAX_COLUMNS: usize = 46;
 const DEBUG_MAX_LINES: usize = 12;
+const SETTINGS_PANEL: Rect = Rect {
+    x: 8,
+    y: 146,
+    width: 704,
+    height: 326,
+};
+const VOLUME_SLIDER: Rect = Rect {
+    x: 164,
+    y: 185,
+    width: 472,
+    height: 24,
+};
+
+fn binding_rect(index: usize) -> Rect {
+    Rect {
+        x: 24 + (index / 5) * 344,
+        y: 244 + (index % 5) * 29,
+        width: 328,
+        height: 25,
+    }
+}
+
+fn volume_from_mouse(x: f32) -> u8 {
+    (((x - VOLUME_SLIDER.x as f32) / (VOLUME_SLIDER.width - 1) as f32).clamp(0.0, 1.0) * 100.0)
+        .round() as u8
+}
 
 impl ExitPrompt {
     // Only a fresh mouse press after opening may confirm. Keyboard input is
@@ -180,11 +207,16 @@ pub struct Ui {
     local_delay: u32,
     debug_visible: bool,
     debug_lines: Vec<String>,
+    preferences: Preferences,
+    controllers: Controllers,
+    active_inputs: Vec<Binding>,
+    volume_dragging: bool,
 }
 
 impl Ui {
     /// Open the one native setup/game window.
-    pub fn new() -> Result<Self, String> {
+    pub fn new(root: &Path) -> Result<Self, String> {
+        let preferences = Preferences::new(root.join("netplay-settings.txt"))?;
         let options = WindowOptions {
             resize: false,
             scale: Scale::X1,
@@ -214,11 +246,16 @@ impl Ui {
             local_delay: DEFAULT_LOCAL_DELAY,
             debug_visible: false,
             debug_lines: Vec::new(),
+            preferences,
+            controllers: Controllers::new()?,
+            active_inputs: Vec::new(),
+            volume_dragging: false,
         })
     }
 
     /// Return the next setup command, if the active window produced one.
     pub fn poll(&mut self) -> Option<Action> {
+        self.preferences.poll_save();
         if !self.window.is_open() {
             return self.report_quit();
         }
@@ -227,6 +264,10 @@ impl Ui {
         // Calling is_active also gives the backend a chance to process focus
         // changes before we inspect the input queues.
         if !self.window.is_active() {
+            self.active_inputs.clear();
+            self.preferences.cancel_capture(&[]);
+            self.preferences.poll_inputs(&[]);
+            self.volume_dragging = false;
             self.mouse_was_down = false;
             self.exit_prompt.mouse_armed = false;
             return None;
@@ -241,6 +282,24 @@ impl Ui {
 
         let was_open = self.exit_prompt.open;
         let escape = just_pressed.contains(&Key::Escape);
+        self.active_inputs = self
+            .window
+            .get_keys()
+            .into_iter()
+            .map(Binding::Keyboard)
+            .collect();
+        self.active_inputs.extend(self.controllers.snapshot());
+        // Escape cancels a binding without opening the exit confirmation.
+        if escape && self.preferences.capture.is_some() {
+            self.preferences.cancel_capture(&self.active_inputs);
+            return None;
+        }
+        if self.screen == Screen::Game && just_pressed.contains(&Key::F1) && !was_open {
+            self.debug_visible = !self.debug_visible;
+            self.preferences.cancel_capture(&self.active_inputs);
+            self.volume_dragging = false;
+        }
+        self.preferences.poll_inputs(&self.active_inputs);
         if self.exit_prompt.update(escape, mouse_down, mouse_position) {
             return self.report_quit();
         }
@@ -248,8 +307,8 @@ impl Ui {
             return None;
         }
 
-        if self.screen == Screen::Game && just_pressed.contains(&Key::F1) {
-            self.debug_visible = !self.debug_visible;
+        if self.screen == Screen::Game && self.debug_visible {
+            self.poll_settings(clicked, mouse_down, mouse_position);
         }
 
         if self.screen != Screen::Setup {
@@ -338,6 +397,10 @@ impl Ui {
 
     /// Draw the setup screen and present the current network status.
     pub fn show_setup(&mut self, status: &str, busy: bool) -> Result<(), String> {
+        if self.screen == Screen::Game {
+            self.preferences.cancel_capture(&self.active_inputs);
+            self.volume_dragging = false;
+        }
         self.screen = Screen::Setup;
         self.busy = busy;
         self.window.set_title(SETUP_TITLE);
@@ -441,7 +504,7 @@ impl Ui {
             &mut self.buffer,
             80,
             426,
-            "Controls: arrows, Z=A, X=B, Enter=Start, RShift=Select, C=L, V=R",
+            "Defaults: arrows, Z=A, X=B, Enter=Start, RShift=Select, C=L, V=R",
             MUTED_TEXT,
             1,
         );
@@ -449,7 +512,7 @@ impl Ui {
             &mut self.buffer,
             80,
             442,
-            "Escape asks before quitting. Closing the window exits.",
+            "F1 in game: volume / bindings. Escape: exit confirmation.",
             MUTED_TEXT,
             1,
         );
@@ -497,10 +560,33 @@ impl Ui {
             return 0;
         }
 
-        self.window
-            .get_keys()
-            .into_iter()
-            .fold(0, |mask, key| mask | key_mask(key))
+        self.preferences.keys(&self.active_inputs)
+    }
+
+    pub fn volume(&self) -> u8 {
+        self.preferences.settings.volume
+    }
+
+    fn poll_settings(&mut self, clicked: bool, mouse_down: bool, position: Option<(f32, f32)>) {
+        if !mouse_down {
+            self.volume_dragging = false;
+        }
+        if let Some((x, y)) = position {
+            if clicked && VOLUME_SLIDER.contains(x, y) {
+                self.volume_dragging = true;
+            }
+            if self.volume_dragging {
+                self.preferences.set_volume(volume_from_mouse(x));
+            }
+            if clicked {
+                for action in 0..ACTION_NAMES.len() {
+                    if binding_rect(action).contains(x, y) {
+                        self.preferences.begin_capture(action, &self.active_inputs);
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     /// Whether the native window still exists.
@@ -598,6 +684,7 @@ impl Ui {
     fn present(&mut self) -> Result<(), String> {
         if self.screen == Screen::Game && self.debug_visible {
             draw_debug_overlay(&mut self.buffer, &self.debug_lines);
+            draw_settings_overlay(&mut self.buffer, &self.preferences);
         }
         if self.exit_prompt.open {
             let panel = Rect {
@@ -854,22 +941,6 @@ fn cursor_from_mouse(text: &str, mouse_x: f32, field_x: usize, field_width: usiz
         .min(field_width.saturating_sub(16) / 8)
 }
 
-fn key_mask(key: Key) -> u32 {
-    match key {
-        Key::Z => keys::A,
-        Key::X => keys::B,
-        Key::RightShift => keys::SELECT,
-        Key::Enter => keys::START,
-        Key::Right => keys::RIGHT,
-        Key::Left => keys::LEFT,
-        Key::Up => keys::UP,
-        Key::Down => keys::DOWN,
-        Key::V => keys::R,
-        Key::C => keys::L,
-        _ => 0,
-    }
-}
-
 fn expand_5_bit(value: u32) -> u32 {
     (value << 3) | (value >> 2)
 }
@@ -1027,6 +1098,101 @@ fn delay_from_mouse(x: f32) -> u32 {
         .floor()
         .clamp(0.0, 3.0) as u32;
     index + 1
+}
+
+fn draw_settings_overlay(buffer: &mut [u32], preferences: &Preferences) {
+    fill_rect(buffer, SETTINGS_PANEL, PANEL);
+    stroke_rect(buffer, SETTINGS_PANEL, ACCENT_DARK);
+    draw_text(buffer, 24, 160, "LOCAL SETTINGS", ACCENT, 1);
+    draw_text(
+        buffer,
+        392,
+        160,
+        "Game keeps running - F1 hides",
+        MUTED_TEXT,
+        1,
+    );
+    draw_text(buffer, 24, 193, "Volume", TEXT, 1);
+    fill_rect(buffer, VOLUME_SLIDER, FIELD);
+    stroke_rect(buffer, VOLUME_SLIDER, ACCENT_DARK);
+    let volume = preferences.settings.volume;
+    let offset = (VOLUME_SLIDER.width - 1) * usize::from(volume) / 100;
+    fill_rect(
+        buffer,
+        Rect {
+            x: VOLUME_SLIDER.x,
+            y: 194,
+            width: offset,
+            height: 6,
+        },
+        ACCENT_DARK,
+    );
+    fill_rect(
+        buffer,
+        Rect {
+            x: VOLUME_SLIDER.x + offset.saturating_sub(3),
+            y: 187,
+            width: 4,
+            height: 20,
+        },
+        ACCENT,
+    );
+    draw_text(buffer, 650, 193, &format!("{volume}%"), TEXT, 1);
+    draw_text(
+        buffer,
+        24,
+        223,
+        "INPUT MAPPER - click a GBA button, then press an input",
+        ACCENT,
+        1,
+    );
+    for (action, name) in ACTION_NAMES.iter().enumerate() {
+        let rect = binding_rect(action);
+        let capturing = preferences.capture == Some(action);
+        fill_rect(buffer, rect, if capturing { FIELD_FOCUS } else { FIELD });
+        stroke_rect(buffer, rect, if capturing { ACCENT } else { ACCENT_DARK });
+        draw_text(buffer, rect.x + 8, rect.y + 8, name, TEXT, 1);
+        let binding = if capturing {
+            "Press input...".into()
+        } else {
+            preferences.settings.bindings[action].to_string()
+        };
+        let label: String = binding.chars().take(27).collect();
+        draw_text(
+            buffer,
+            rect.x + 104,
+            rect.y + 8,
+            &label,
+            if capturing { ACCENT } else { MUTED_TEXT },
+            1,
+        );
+    }
+    let hint = if preferences.capture.is_some() {
+        "Press a NEW key / pad button / axis. Escape cancels."
+    } else {
+        "Keyboard or XInput pad; sticks + triggers supported."
+    };
+    draw_text(buffer, 24, 395, hint, TEXT, 1);
+    draw_text(
+        buffer,
+        24,
+        411,
+        "F1 / Escape reserved. Mapping replaces that button's input.",
+        MUTED_TEXT,
+        1,
+    );
+    let color = if preferences.save_failed {
+        ERROR
+    } else {
+        MUTED_TEXT
+    };
+    for (row, line) in wrap_text(&preferences.status, 82)
+        .iter()
+        .take(3)
+        .enumerate()
+    {
+        draw_text(buffer, 24, 432 + row * 11, line, color, 1);
+    }
 }
 
 fn draw_debug_overlay(buffer: &mut [u32], lines: &[String]) {

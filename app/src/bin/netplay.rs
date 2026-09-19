@@ -128,7 +128,7 @@ fn main() {
 }
 
 fn run(root: &Path) -> Result<(), String> {
-    let mut ui = Ui::new()?;
+    let mut ui = Ui::new(root)?;
     if std::env::args().any(|arg| arg == "--ui-preview") {
         ui.show_setup("Listening on UDP port 24872. Forward this UDP port to this computer. Waiting for your friend to connect.", true)?;
         ui.write_preview(&root.join("setup-preview.bmp"))?;
@@ -310,6 +310,7 @@ fn run(root: &Path) -> Result<(), String> {
                         }
                     }
                     if let Some(output) = &mut audio {
+                        output.set_volume(ui.volume());
                         output.pump(&active.session, active.player);
                     } else {
                         active.session.with_link(|link| {

@@ -25,15 +25,33 @@ The host waits for the guest until the window is closed. Use IPv4 for internet
 hosting in this build. Port forwarding, public IP discovery, and router setup are
 manual. Networks behind carrier-grade NAT need an actual reachable public IP.
 
-CONTROLS (same on both computers)
+DEFAULT CONTROLS (customizable independently on each computer)
 Arrows = D-pad       Z = A       X = B
 Enter = Start       Right Shift = Select       C = L       V = R
-F1 = toggle live statistics (white panel, red text).
+F1 = toggle live statistics, volume slider, and input mapper.
 Escape = exit confirmation; click Yes with the mouse to quit. Escape cancels.
   The session keeps running while the prompt is open; game buttons are released.
   Closing the window ends the session immediately.
-Keyboard input releases when the game window loses focus. There is no controller
-mapping UI yet. Select the in-game language and menus normally.
+Keyboard and controller input releases when the game window loses focus.
+Select the in-game language and menus normally.
+
+LOCAL SETTINGS (F1 during gameplay)
+Drag the volume slider from 0% (mute) to 100%. Only local playback changes.
+Click a GBA button's mapping row, then press a new keyboard key or XInput
+controller button, move a stick in one direction, or pull a trigger. The row
+shows its current binding. Each GBA button has one binding; remapping replaces
+the previous keyboard/controller input. F1 and Escape are reserved shortcuts.
+Any connected XInput controller can be mapped. Bindings show its slot (1-4);
+remap if Windows assigns a different slot after reconnecting. New controllers
+are detected within about a second. Non-XInput devices need an XInput
+compatibility layer. Sticks use a fixed dead zone and triggers a fixed threshold.
+Release an already-held input and press it again to capture it. Escape cancels
+capture. The captured input must be released before it can affect gameplay.
+The game and connection NEVER pause for settings. During binding capture your
+local buttons are released; with the overlay merely open you can keep playing.
+Volume and mappings save automatically to netplay-settings.txt beside the EXE.
+File writes run in the background; the panel reports save errors. Keep the folder
+writable. Settings are local and survive restarts and portable EXE updates.
 
 LIVE STATISTICS
 Ping is QUIC's smoothed round-trip time, not one-way input travel time.

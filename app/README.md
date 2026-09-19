@@ -121,3 +121,21 @@ when finished; the windows close and recorded-input determinism, artificial-late
 rollback, and snapshot replay checks start automatically. `--verify DIR` repeats
 those checks headlessly using the same executable and ROM. See
 [`notes/PHASE4_DETERMINISM.md`](../notes/PHASE4_DETERMINISM.md) for the test strategy.
+
+## Netplay local preferences
+
+In `SS2-Netplay`, F1 shows live statistics plus playback volume and an input
+mapper. Click a GBA button row and press a fresh keyboard key, XInput button,
+stick direction, or trigger. Each action has one displayed binding. Escape
+cancels capture; Escape and F1 remain reserved. XInput bindings include the
+controller slot (1-4); any connected slot can be mapped. Focus loss and
+disconnection release input. Device polling runs off the simulation thread,
+with disconnected slots retried once per second.
+
+`netplay-settings.txt` beside the executable stores versioned local preferences.
+Writes run on a dedicated worker and the latest queued change is flushed on
+normal shutdown. The panel reports load/save errors. The package updater leaves
+this file intact and excludes personal preferences from the distributable ZIP.
+No setting pauses the session: capture submits neutral local input, while normal
+overlay use preserves gameplay input. Volume is applied at host audio output;
+mapped button masks enter the existing session input path before rollback.
