@@ -1,9 +1,28 @@
-/Shining_Soul_II.gba
+# Copyrighted game images and emulator state/save data
+*.gba
+*.gb
+*.gbc
+*.sav
+*.sav.bak
+*.sav.tmp
+*.ss[0-9]
+
+# Private captures, diagnostics, and machine-specific state
+/recordings/
+/saves/
+/app/firewall-backups/
+*.log
+
+# Local build and packaging output
 /.cargo-home/
 /app/target/
-/saves/
-*.sav
-/recordings/
-/app/*-phase4.log
 /dist/
-/app/*-netplay.log
+
+# Local credentials and signing material
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx

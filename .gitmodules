@@ -1,0 +1,9 @@
+[submodule "getgud"]
+	path = getgud
+	url = https://github.com/tangobattle/getgud.git
+[submodule "mgba-rollback"]
+	path = mgba-rollback
+	url = https://github.com/Ddhuet/SS2-netplay-mgba-rollback.git
+[submodule "mgba-rs"]
+	path = mgba-rs
+	url = https://github.com/Ddhuet/SS2-netplay-mgba-rs.git
