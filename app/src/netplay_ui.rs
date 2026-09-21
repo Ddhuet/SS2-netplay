@@ -14,6 +14,7 @@ const GBA_HEIGHT: usize = 160;
 const GBA_SCALE: usize = 3;
 const DEFAULT_ADDRESS: &str = "127.0.0.1";
 const DEFAULT_PORT: &str = "24872";
+const CONNECT_CODE_MAX_LEN: usize = 2048;
 
 const SETUP_TITLE: &str = "Shining Soul II - Rollback Netplay";
 
@@ -68,10 +69,43 @@ const STATUS_PANEL: Rect = Rect {
     width: 560,
     height: 68,
 };
+const CONNECT_CODE_FIELD: Rect = Rect {
+    x: 80,
+    y: 126,
+    width: 560,
+    height: 38,
+};
+const CODE_COPY_BUTTON: Rect = Rect {
+    x: 80,
+    y: 184,
+    width: 150,
+    height: 38,
+};
+const CODE_DELAY_SELECTOR: Rect = Rect {
+    x: 260,
+    y: 184,
+    width: 220,
+    height: 38,
+};
+const MODE_BUTTON: Rect = Rect {
+    x: 500,
+    y: 72,
+    width: 140,
+    height: 32,
+};
+const CANCEL_BUTTON: Rect = Rect {
+    x: 205,
+    y: 250,
+    width: 310,
+    height: 48,
+};
 
 /// A command emitted by the setup screen.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Action {
+    HostCode,
+    JoinCode(String),
+    Cancel,
     Host(u16),
     Connect(SocketAddr),
     Quit,
@@ -79,6 +113,7 @@ pub enum Action {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Focus {
+    ConnectCode,
     Address,
     Port,
 }
@@ -195,15 +230,19 @@ pub struct Ui {
     buffer: Vec<u32>,
     address: String,
     port: String,
+    connect_code: String,
+    connect_code_cursor: usize,
     address_cursor: usize,
     port_cursor: usize,
     focus: Focus,
+    direct_mode: bool,
     screen: Screen,
     busy: bool,
     mouse_was_down: bool,
     quit_reported: bool,
     exit_prompt: ExitPrompt,
     local_status: Option<String>,
+    local_notice: Option<String>,
     local_delay: u32,
     debug_visible: bool,
     debug_lines: Vec<String>,
@@ -234,15 +273,19 @@ impl Ui {
             buffer: vec![BACKGROUND; WINDOW_WIDTH * WINDOW_HEIGHT],
             address: DEFAULT_ADDRESS.to_owned(),
             port: DEFAULT_PORT.to_owned(),
+            connect_code: String::new(),
+            connect_code_cursor: 0,
             address_cursor: DEFAULT_ADDRESS.len(),
             port_cursor: DEFAULT_PORT.len(),
-            focus: Focus::Address,
+            focus: Focus::ConnectCode,
+            direct_mode: false,
             screen: Screen::Setup,
             busy: false,
             mouse_was_down: false,
             quit_reported: false,
             exit_prompt: ExitPrompt::default(),
             local_status: None,
+            local_notice: None,
             local_delay: DEFAULT_LOCAL_DELAY,
             debug_visible: false,
             debug_lines: Vec::new(),
@@ -315,8 +358,9 @@ impl Ui {
             return None;
         }
 
-        // Pasting replaces the selected field, convenient for an IP shared by
-        // a friend. Clipboard access occurs only on the user's Ctrl+V action.
+        // Pasting replaces the selected field. Clipboard access occurs only on
+        // the user's Ctrl+V action, so opening the setup screen never reads
+        // or writes the system clipboard on its own.
         if (self.window.is_key_down(Key::LeftCtrl) || self.window.is_key_down(Key::RightCtrl))
             && just_pressed.contains(&Key::V)
             && !self.busy
@@ -324,6 +368,18 @@ impl Ui {
             if let Some(value) = clipboard_text() {
                 let value = value.trim();
                 match self.focus {
+                    Focus::ConnectCode => match normalize_connect_code(value) {
+                        Ok(value) => {
+                            self.connect_code = value;
+                            self.connect_code_cursor = self.connect_code.len();
+                            self.local_status = None;
+                            self.local_notice = None;
+                        }
+                        Err(error) => {
+                            self.local_status = Some(error);
+                            self.local_notice = None;
+                        }
+                    },
                     Focus::Address
                         if value.len() <= 64
                             && value
@@ -333,6 +389,7 @@ impl Ui {
                         self.address = value.to_string();
                         self.address_cursor = value.len();
                         self.local_status = None;
+                        self.local_notice = None;
                     }
                     Focus::Port
                         if value.len() <= 5 && value.chars().all(|c| c.is_ascii_digit()) =>
@@ -340,6 +397,7 @@ impl Ui {
                         self.port = value.to_string();
                         self.port_cursor = value.len();
                         self.local_status = None;
+                        self.local_notice = None;
                     }
                     _ => {
                         self.local_status =
@@ -352,44 +410,96 @@ impl Ui {
 
         if clicked {
             if let Some((x, y)) = mouse_position {
-                if IP_FIELD.contains(x, y) {
-                    self.focus = Focus::Address;
-                    self.address_cursor =
-                        cursor_from_mouse(&self.address, x, IP_FIELD.x, IP_FIELD.width);
-                } else if PORT_FIELD.contains(x, y) {
-                    self.focus = Focus::Port;
-                    self.port_cursor =
-                        cursor_from_mouse(&self.port, x, PORT_FIELD.x, PORT_FIELD.width);
-                } else if DELAY_SELECTOR.contains(x, y) && !self.busy {
-                    self.local_delay = delay_from_mouse(x);
+                if MODE_BUTTON.contains(x, y) {
+                    if !self.busy {
+                        self.direct_mode = !self.direct_mode;
+                        self.focus = if self.direct_mode {
+                            Focus::Address
+                        } else {
+                            Focus::ConnectCode
+                        };
+                        self.local_status = None;
+                        self.local_notice = None;
+                    }
+                } else if !self.direct_mode && CODE_COPY_BUTTON.contains(x, y) {
+                    self.copy_connect_code();
+                } else if self.busy && CANCEL_BUTTON.contains(x, y) {
+                    return Some(Action::Cancel);
+                } else if self.direct_mode {
+                    if IP_FIELD.contains(x, y) {
+                        self.focus = Focus::Address;
+                        self.address_cursor = cursor_from_mouse(
+                            &self.address,
+                            self.address_cursor,
+                            x,
+                            IP_FIELD.x,
+                            IP_FIELD.width,
+                        );
+                    } else if PORT_FIELD.contains(x, y) {
+                        self.focus = Focus::Port;
+                        self.port_cursor = cursor_from_mouse(
+                            &self.port,
+                            self.port_cursor,
+                            x,
+                            PORT_FIELD.x,
+                            PORT_FIELD.width,
+                        );
+                    } else if DELAY_SELECTOR.contains(x, y) && !self.busy {
+                        self.local_delay = delay_from_mouse(x);
+                    } else if HOST_BUTTON.contains(x, y) {
+                        return self.host_action();
+                    } else if CONNECT_BUTTON.contains(x, y) {
+                        return self.connect_action();
+                    }
+                } else if CONNECT_CODE_FIELD.contains(x, y) {
+                    self.focus = Focus::ConnectCode;
+                    self.connect_code_cursor = cursor_from_mouse(
+                        &self.connect_code,
+                        self.connect_code_cursor,
+                        x,
+                        CONNECT_CODE_FIELD.x,
+                        CONNECT_CODE_FIELD.width,
+                    );
+                } else if CODE_DELAY_SELECTOR.contains(x, y) && !self.busy {
+                    self.local_delay = delay_from_mouse_in(x, CODE_DELAY_SELECTOR);
                 } else if HOST_BUTTON.contains(x, y) {
-                    return self.host_action();
+                    return self.host_code_action();
                 } else if CONNECT_BUTTON.contains(x, y) {
-                    return self.connect_action();
+                    return self.join_code_action();
                 }
             }
         }
 
-        let shift_held =
-            self.window.is_key_down(Key::LeftShift) || self.window.is_key_down(Key::RightShift);
-        for key in pressed {
-            if key == Key::Tab {
-                self.focus = match self.focus {
-                    Focus::Address => Focus::Port,
-                    Focus::Port => Focus::Address,
-                };
-                continue;
-            }
-            if key != Key::Enter {
-                self.edit_focused_field(key, shift_held);
+        if !self.busy {
+            let shift_held =
+                self.window.is_key_down(Key::LeftShift) || self.window.is_key_down(Key::RightShift);
+            for key in pressed {
+                if key == Key::Tab {
+                    self.focus = if self.direct_mode {
+                        match self.focus {
+                            Focus::Address => Focus::Port,
+                            Focus::Port | Focus::ConnectCode => Focus::Address,
+                        }
+                    } else {
+                        Focus::ConnectCode
+                    };
+                    continue;
+                }
+                if key != Key::Enter {
+                    self.edit_focused_field(key, shift_held);
+                }
             }
         }
 
-        // Enter is a convenient keyboard equivalent to the Connect button.
-        // It is read from the edge-triggered list so holding it cannot emit a
-        // stream of duplicate connection attempts.
+        // Enter is a convenient keyboard equivalent to the Join/Connect
+        // button. It is read from the edge-triggered list so holding it
+        // cannot emit a stream of duplicate connection attempts.
         if just_pressed.contains(&Key::Enter) {
-            return self.connect_action();
+            return if self.direct_mode {
+                self.connect_action()
+            } else {
+                self.join_code_action()
+            };
         }
 
         None
@@ -439,56 +549,113 @@ impl Ui {
             &mut self.buffer,
             80,
             78,
-            "Two-player rollback over a direct IP connection",
+            if self.direct_mode {
+                "Two-player rollback over a direct IP connection"
+            } else {
+                "Share a connect code with your friend"
+            },
             MUTED_TEXT,
             1,
         );
 
-        draw_text(&mut self.buffer, 80, 140, "IP ADDRESS", MUTED_TEXT, 1);
-        draw_text(&mut self.buffer, 80, 198, "PORT", MUTED_TEXT, 1);
-        draw_input_field(
-            &mut self.buffer,
-            IP_FIELD,
-            &self.address,
-            self.focus == Focus::Address,
-            self.address_cursor,
-        );
-        draw_input_field(
-            &mut self.buffer,
-            PORT_FIELD,
-            &self.port,
-            self.focus == Focus::Port,
-            self.port_cursor,
-        );
-        draw_text(
-            &mut self.buffer,
-            DELAY_SELECTOR.x,
-            DELAY_SELECTOR.y.saturating_sub(10),
-            "DELAY (FRAMES)",
-            MUTED_TEXT,
-            1,
-        );
-        draw_delay_selector(
-            &mut self.buffer,
-            DELAY_SELECTOR,
-            self.local_delay,
-            !self.busy,
-        );
-
-        draw_button(&mut self.buffer, HOST_BUTTON, "HOST", !self.busy, false);
         draw_button(
             &mut self.buffer,
-            CONNECT_BUTTON,
-            "CONNECT",
+            MODE_BUTTON,
+            if self.direct_mode {
+                "USE CODE"
+            } else {
+                "DIRECT CONNECT"
+            },
             !self.busy,
             false,
         );
+
+        if self.direct_mode {
+            draw_text(&mut self.buffer, 80, 140, "IP ADDRESS", MUTED_TEXT, 1);
+            draw_text(&mut self.buffer, 80, 198, "PORT", MUTED_TEXT, 1);
+            draw_input_field(
+                &mut self.buffer,
+                IP_FIELD,
+                &self.address,
+                self.focus == Focus::Address,
+                self.address_cursor,
+            );
+            draw_input_field(
+                &mut self.buffer,
+                PORT_FIELD,
+                &self.port,
+                self.focus == Focus::Port,
+                self.port_cursor,
+            );
+            draw_text(
+                &mut self.buffer,
+                DELAY_SELECTOR.x,
+                DELAY_SELECTOR.y.saturating_sub(10),
+                "DELAY (FRAMES)",
+                MUTED_TEXT,
+                1,
+            );
+            draw_delay_selector(
+                &mut self.buffer,
+                DELAY_SELECTOR,
+                self.local_delay,
+                !self.busy,
+            );
+        } else {
+            draw_text(
+                &mut self.buffer,
+                CONNECT_CODE_FIELD.x,
+                CONNECT_CODE_FIELD.y.saturating_sub(10),
+                "CONNECT CODE (PASTE HERE)",
+                MUTED_TEXT,
+                1,
+            );
+            draw_input_field(
+                &mut self.buffer,
+                CONNECT_CODE_FIELD,
+                &self.connect_code,
+                self.focus == Focus::ConnectCode,
+                self.connect_code_cursor,
+            );
+            draw_button(
+                &mut self.buffer,
+                CODE_COPY_BUTTON,
+                "COPY CODE",
+                !self.connect_code.is_empty(),
+                false,
+            );
+            draw_text(
+                &mut self.buffer,
+                CODE_DELAY_SELECTOR.x,
+                CODE_DELAY_SELECTOR.y.saturating_sub(10),
+                "DELAY (FRAMES)",
+                MUTED_TEXT,
+                1,
+            );
+            draw_delay_selector(
+                &mut self.buffer,
+                CODE_DELAY_SELECTOR,
+                self.local_delay,
+                !self.busy,
+            );
+        }
+
+        if self.busy {
+            draw_button(&mut self.buffer, CANCEL_BUTTON, "CANCEL", true, false);
+        } else if self.direct_mode {
+            draw_button(&mut self.buffer, HOST_BUTTON, "HOST", true, false);
+            draw_button(&mut self.buffer, CONNECT_BUTTON, "CONNECT", true, false);
+        } else {
+            draw_button(&mut self.buffer, HOST_BUTTON, "HOST", true, false);
+            draw_button(&mut self.buffer, CONNECT_BUTTON, "JOIN", true, false);
+        }
 
         draw_status(
             &mut self.buffer,
             STATUS_PANEL,
             status,
             self.local_status.as_deref(),
+            self.local_notice.as_deref(),
             self.busy,
         );
 
@@ -597,6 +764,44 @@ impl Ui {
     /// Return the local input delay selected on the setup screen.
     pub fn selected_delay(&self) -> u32 {
         self.local_delay
+    }
+
+    /// Replace the connect code shown in the setup screen.
+    ///
+    /// Hosts call this after the transport has created a code. The same
+    /// field is used for joining, which also makes it possible to replace a
+    /// stale code by pasting a new one without changing screens.
+    pub fn set_connect_code(&mut self, code: String) {
+        match normalize_connect_code(&code) {
+            Ok(code) => {
+                self.connect_code = code;
+                self.connect_code_cursor = self.connect_code.len();
+                self.local_status = None;
+                self.local_notice = None;
+            }
+            Err(error) => {
+                self.connect_code.clear();
+                self.connect_code_cursor = 0;
+                self.local_status = Some(error);
+                self.local_notice = None;
+            }
+        }
+    }
+
+    /// Select the legacy direct-IP setup view, primarily for preview capture.
+    /// The visible mode button is the normal user-facing toggle.
+    pub fn set_direct_mode(&mut self, direct: bool) {
+        if self.busy {
+            return;
+        }
+        self.direct_mode = direct;
+        self.focus = if direct {
+            Focus::Address
+        } else {
+            Focus::ConnectCode
+        };
+        self.local_status = None;
+        self.local_notice = None;
     }
 
     /// Replace the lines shown by the optional in-game diagnostics overlay.
@@ -736,10 +941,48 @@ impl Ui {
         }
     }
 
+    fn copy_connect_code(&mut self) {
+        if self.connect_code.is_empty() {
+            self.local_status = Some("There is no connect code to copy yet.".into());
+            self.local_notice = None;
+        } else if clipboard_set_text(self.window.get_window_handle(), &self.connect_code) {
+            self.local_status = None;
+            self.local_notice = Some("Connect code copied to clipboard.".into());
+        } else {
+            self.local_status = Some("Unable to copy the connect code to the clipboard.".into());
+            self.local_notice = None;
+        }
+    }
+
+    fn host_code_action(&mut self) -> Option<Action> {
+        if self.busy {
+            return None;
+        }
+        self.local_status = None;
+        self.local_notice = None;
+        Some(Action::HostCode)
+    }
+
+    fn join_code_action(&mut self) -> Option<Action> {
+        if self.busy {
+            return None;
+        }
+        let code = self.connect_code.trim();
+        if code.is_empty() {
+            self.local_status = Some("Paste the host's connect code first.".into());
+            self.local_notice = None;
+            return None;
+        }
+        self.local_status = None;
+        self.local_notice = None;
+        Some(Action::JoinCode(code.to_owned()))
+    }
+
     fn host_action(&mut self) -> Option<Action> {
         if self.busy {
             return None;
         }
+        self.local_notice = None;
         match parse_port(&self.port) {
             Ok(port) => {
                 self.local_status = None;
@@ -756,6 +999,8 @@ impl Ui {
         if self.busy {
             return None;
         }
+
+        self.local_notice = None;
 
         let port = match parse_port(&self.port) {
             Ok(port) => port,
@@ -786,6 +1031,13 @@ impl Ui {
 
     fn edit_focused_field(&mut self, key: Key, shift_held: bool) {
         match self.focus {
+            Focus::ConnectCode => edit_text(
+                &mut self.connect_code,
+                &mut self.connect_code_cursor,
+                key,
+                code_character(key, shift_held),
+                CONNECT_CODE_MAX_LEN,
+            ),
             Focus::Address => edit_text(
                 &mut self.address,
                 &mut self.address_cursor,
@@ -843,6 +1095,39 @@ mod exit_prompt_tests {
         assert!(!prompt.update(false, true, Some((170.0, 280.0))));
         assert!(!prompt.open);
     }
+
+    #[test]
+    fn connect_code_is_trimmed_and_limited() {
+        assert_eq!(
+            normalize_connect_code("  host-code  ").unwrap(),
+            "host-code"
+        );
+        assert!(normalize_connect_code(&"x".repeat(CONNECT_CODE_MAX_LEN + 1)).is_err());
+        assert!(normalize_connect_code("host\ncode").is_err());
+    }
+
+    #[test]
+    fn clicking_scrolled_code_edits_visible_characters() {
+        let code = "x".repeat(120);
+        assert_eq!(cursor_from_mouse(&code, 120, 90.0, 80, 560), 54);
+        assert_eq!(cursor_from_mouse(&code, 120, 114.0, 80, 560), 57);
+        assert_eq!(cursor_from_mouse(&code, 0, 90.0, 80, 560), 0);
+    }
+
+    #[test]
+    fn editing_unicode_code_keeps_cursor_on_character_boundaries() {
+        let mut text = "é".to_owned();
+        let mut cursor = text.len();
+        edit_text(
+            &mut text,
+            &mut cursor,
+            Key::Backspace,
+            None,
+            CONNECT_CODE_MAX_LEN,
+        );
+        assert!(text.is_empty());
+        assert_eq!(cursor, 0);
+    }
 }
 
 fn parse_port(value: &str) -> Result<u16, String> {
@@ -854,6 +1139,19 @@ fn parse_port(value: &str) -> Result<u16, String> {
     }
 }
 
+fn normalize_connect_code(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.len() > CONNECT_CODE_MAX_LEN {
+        return Err(format!(
+            "Connect code is too long. The maximum is {CONNECT_CODE_MAX_LEN} bytes."
+        ));
+    }
+    if value.chars().any(char::is_control) {
+        return Err("Connect code contains an unsupported control character.".to_owned());
+    }
+    Ok(value.to_owned())
+}
+
 fn edit_text(
     text: &mut String,
     cursor: &mut usize,
@@ -861,32 +1159,193 @@ fn edit_text(
     character: Option<char>,
     max_len: usize,
 ) {
-    *cursor = (*cursor).min(text.len());
+    *cursor = clamp_cursor(text, *cursor);
     match key {
         Key::Backspace => {
-            if *cursor > 0 {
-                text.remove(*cursor - 1);
-                *cursor -= 1;
+            if let Some(previous) = text[..*cursor].char_indices().next_back().map(|(i, _)| i) {
+                text.drain(previous..*cursor);
+                *cursor = previous;
             }
         }
         Key::Delete => {
-            if *cursor < text.len() {
-                text.remove(*cursor);
+            if let Some(character) = text[*cursor..].chars().next() {
+                let end = *cursor + character.len_utf8();
+                text.drain(*cursor..end);
             }
         }
-        Key::Left => *cursor = cursor.saturating_sub(1),
-        Key::Right => *cursor = (*cursor + 1).min(text.len()),
+        Key::Left => {
+            *cursor = text[..*cursor]
+                .char_indices()
+                .next_back()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+        }
+        Key::Right => {
+            *cursor += text[*cursor..]
+                .chars()
+                .next()
+                .map(char::len_utf8)
+                .unwrap_or(0);
+        }
         Key::Home => *cursor = 0,
         Key::End => *cursor = text.len(),
         _ => {
             if let Some(character) = character {
-                if text.len() < max_len {
+                if text.len() + character.len_utf8() <= max_len {
                     text.insert(*cursor, character);
                     *cursor += character.len_utf8();
                 }
             }
         }
     }
+}
+
+fn clamp_cursor(text: &str, cursor: usize) -> usize {
+    let mut cursor = cursor.min(text.len());
+    while cursor > 0 && !text.is_char_boundary(cursor) {
+        cursor -= 1;
+    }
+    cursor
+}
+
+fn code_character(key: Key, shift_held: bool) -> Option<char> {
+    let character = match key {
+        Key::Key0 | Key::NumPad0 => '0',
+        Key::Key1 | Key::NumPad1 => '1',
+        Key::Key2 | Key::NumPad2 => '2',
+        Key::Key3 | Key::NumPad3 => '3',
+        Key::Key4 | Key::NumPad4 => '4',
+        Key::Key5 | Key::NumPad5 => '5',
+        Key::Key6 | Key::NumPad6 => '6',
+        Key::Key7 | Key::NumPad7 => '7',
+        Key::Key8 | Key::NumPad8 => '8',
+        Key::Key9 | Key::NumPad9 => '9',
+        Key::A => {
+            return Some(if shift_held { 'A' } else { 'a' });
+        }
+        Key::B => {
+            return Some(if shift_held { 'B' } else { 'b' });
+        }
+        Key::C => {
+            return Some(if shift_held { 'C' } else { 'c' });
+        }
+        Key::D => {
+            return Some(if shift_held { 'D' } else { 'd' });
+        }
+        Key::E => {
+            return Some(if shift_held { 'E' } else { 'e' });
+        }
+        Key::F => {
+            return Some(if shift_held { 'F' } else { 'f' });
+        }
+        Key::G => {
+            return Some(if shift_held { 'G' } else { 'g' });
+        }
+        Key::H => {
+            return Some(if shift_held { 'H' } else { 'h' });
+        }
+        Key::I => {
+            return Some(if shift_held { 'I' } else { 'i' });
+        }
+        Key::J => {
+            return Some(if shift_held { 'J' } else { 'j' });
+        }
+        Key::K => {
+            return Some(if shift_held { 'K' } else { 'k' });
+        }
+        Key::L => {
+            return Some(if shift_held { 'L' } else { 'l' });
+        }
+        Key::M => {
+            return Some(if shift_held { 'M' } else { 'm' });
+        }
+        Key::N => {
+            return Some(if shift_held { 'N' } else { 'n' });
+        }
+        Key::O => {
+            return Some(if shift_held { 'O' } else { 'o' });
+        }
+        Key::P => {
+            return Some(if shift_held { 'P' } else { 'p' });
+        }
+        Key::Q => {
+            return Some(if shift_held { 'Q' } else { 'q' });
+        }
+        Key::R => {
+            return Some(if shift_held { 'R' } else { 'r' });
+        }
+        Key::S => {
+            return Some(if shift_held { 'S' } else { 's' });
+        }
+        Key::T => {
+            return Some(if shift_held { 'T' } else { 't' });
+        }
+        Key::U => {
+            return Some(if shift_held { 'U' } else { 'u' });
+        }
+        Key::V => {
+            return Some(if shift_held { 'V' } else { 'v' });
+        }
+        Key::W => {
+            return Some(if shift_held { 'W' } else { 'w' });
+        }
+        Key::X => {
+            return Some(if shift_held { 'X' } else { 'x' });
+        }
+        Key::Y => {
+            return Some(if shift_held { 'Y' } else { 'y' });
+        }
+        Key::Z => {
+            return Some(if shift_held { 'Z' } else { 'z' });
+        }
+        Key::Minus => {
+            return Some(if shift_held { '_' } else { '-' });
+        }
+        Key::Equal => {
+            return Some(if shift_held { '+' } else { '=' });
+        }
+        Key::Period | Key::NumPadDot => '.',
+        Key::Comma => ',',
+        Key::Slash => '/',
+        Key::Semicolon => {
+            if shift_held {
+                ':'
+            } else {
+                ';'
+            }
+        }
+        Key::LeftBracket => {
+            if shift_held {
+                '{'
+            } else {
+                '['
+            }
+        }
+        Key::RightBracket => {
+            if shift_held {
+                '}'
+            } else {
+                ']'
+            }
+        }
+        Key::Backslash => {
+            if shift_held {
+                '|'
+            } else {
+                '\\'
+            }
+        }
+        Key::Apostrophe => {
+            if shift_held {
+                '"'
+            } else {
+                '\''
+            }
+        }
+        Key::Space => ' ',
+        _ => return None,
+    };
+    Some(character)
 }
 
 fn address_character(key: Key, _shift_held: bool) -> Option<char> {
@@ -933,12 +1392,22 @@ fn port_character(key: Key) -> Option<char> {
     }
 }
 
-fn cursor_from_mouse(text: &str, mouse_x: f32, field_x: usize, field_width: usize) -> usize {
+fn cursor_from_mouse(
+    text: &str,
+    cursor: usize,
+    mouse_x: f32,
+    field_x: usize,
+    field_width: usize,
+) -> usize {
     let relative = (mouse_x - field_x as f32 - 10.0).max(0.0);
-    let position = (relative / 8.0).round() as usize;
-    position
-        .min(text.len())
-        .min(field_width.saturating_sub(16) / 8)
+    let visible_position = (relative / 8.0).round() as usize;
+    let max_chars = field_width.saturating_sub(20) / 8;
+    let cursor_char = text[..clamp_cursor(text, cursor)].chars().count();
+    let first_char = cursor_char.saturating_sub(max_chars.saturating_sub(1));
+    text.char_indices()
+        .nth(first_char + visible_position.min(max_chars))
+        .map(|(index, _)| index)
+        .unwrap_or(text.len())
 }
 
 fn expand_5_bit(value: u32) -> u32 {
@@ -1019,9 +1488,14 @@ fn stroke_rect(buffer: &mut [u32], rect: Rect, color: u32) {
 fn draw_input_field(buffer: &mut [u32], rect: Rect, value: &str, focused: bool, cursor: usize) {
     fill_rect(buffer, rect, if focused { FIELD_FOCUS } else { FIELD });
     stroke_rect(buffer, rect, if focused { ACCENT } else { ACCENT_DARK });
-    draw_text(buffer, rect.x + 10, rect.y + 11, value, TEXT, 1);
+    let cursor = clamp_cursor(value, cursor);
+    let cursor_char = value[..cursor].chars().count();
+    let max_chars = rect.width.saturating_sub(20) / 8;
+    let first_char = cursor_char.saturating_sub(max_chars.saturating_sub(1));
+    let visible: String = value.chars().skip(first_char).take(max_chars).collect();
+    draw_text(buffer, rect.x + 10, rect.y + 11, &visible, TEXT, 1);
     if focused {
-        let cursor_x = rect.x + 10 + cursor.min(rect.width.saturating_sub(20) / 8) * 8;
+        let cursor_x = rect.x + 10 + cursor_char.saturating_sub(first_char).min(max_chars) * 8;
         fill_rect(
             buffer,
             Rect {
@@ -1093,8 +1567,12 @@ fn delay_segment_rect(rect: Rect, index: usize) -> Rect {
 }
 
 fn delay_from_mouse(x: f32) -> u32 {
-    let segment_width = DELAY_SELECTOR.width as f32 / 4.0;
-    let index = ((x - DELAY_SELECTOR.x as f32) / segment_width)
+    delay_from_mouse_in(x, DELAY_SELECTOR)
+}
+
+fn delay_from_mouse_in(x: f32, rect: Rect) -> u32 {
+    let segment_width = rect.width as f32 / 4.0;
+    let index = ((x - rect.x as f32) / segment_width)
         .floor()
         .clamp(0.0, 3.0) as u32;
     index + 1
@@ -1248,6 +1726,7 @@ fn draw_status(
     rect: Rect,
     status: &str,
     local_status: Option<&str>,
+    local_notice: Option<&str>,
     busy: bool,
 ) {
     fill_rect(buffer, rect, PANEL_DARK);
@@ -1266,7 +1745,7 @@ fn draw_status(
 
     let mut line_y = rect.y + 26;
     let max_y = rect.y + rect.height.saturating_sub(8);
-    let display = local_status.unwrap_or(status);
+    let display = local_status.or(local_notice).unwrap_or(status);
     let columns = (rect.width - 20) / 8;
     let wrapped = wrap_text(display, columns);
     for line in &wrapped {
@@ -1335,8 +1814,10 @@ fn clipboard_text() -> Option<String> {
         let result = if data.is_null() {
             None
         } else {
-            let text =
-                std::slice::from_raw_parts(data.cast::<u16>(), (GlobalSize(handle) / 2).min(256));
+            let text = std::slice::from_raw_parts(
+                data.cast::<u16>(),
+                (GlobalSize(handle) / 2).min(CONNECT_CODE_MAX_LEN + 1),
+            );
             Some(String::from_utf16_lossy(
                 &text[..text.iter().position(|v| *v == 0).unwrap_or(text.len())],
             ))
@@ -1351,6 +1832,60 @@ fn clipboard_text() -> Option<String> {
 #[cfg(not(windows))]
 fn clipboard_text() -> Option<String> {
     None
+}
+
+#[cfg(windows)]
+fn clipboard_set_text(owner: *mut std::ffi::c_void, value: &str) -> bool {
+    use std::ffi::c_void;
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn OpenClipboard(window: *mut c_void) -> i32;
+        fn CloseClipboard() -> i32;
+        fn EmptyClipboard() -> i32;
+        fn SetClipboardData(format: u32, memory: *mut c_void) -> *mut c_void;
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GlobalAlloc(flags: u32, bytes: usize) -> *mut c_void;
+        fn GlobalFree(memory: *mut c_void) -> *mut c_void;
+        fn GlobalLock(memory: *mut c_void) -> *mut c_void;
+        fn GlobalUnlock(memory: *mut c_void) -> i32;
+    }
+
+    let mut utf16: Vec<u16> = value.encode_utf16().collect();
+    utf16.push(0);
+    unsafe {
+        // EmptyClipboard requires a real owner for SetClipboardData to succeed.
+        if owner.is_null() || OpenClipboard(owner) == 0 {
+            return false;
+        }
+        let memory = GlobalAlloc(0x0002, utf16.len() * std::mem::size_of::<u16>());
+        if memory.is_null() {
+            CloseClipboard();
+            return false;
+        }
+        let data = GlobalLock(memory).cast::<u16>();
+        if data.is_null() {
+            GlobalFree(memory);
+            CloseClipboard();
+            return false;
+        }
+        std::ptr::copy_nonoverlapping(utf16.as_ptr(), data, utf16.len());
+        GlobalUnlock(memory);
+        if EmptyClipboard() == 0 || SetClipboardData(13, memory).is_null() {
+            GlobalFree(memory);
+            CloseClipboard();
+            return false;
+        }
+        CloseClipboard();
+        true
+    }
+}
+
+#[cfg(not(windows))]
+fn clipboard_set_text(_owner: *mut std::ffi::c_void, _value: &str) -> bool {
+    false
 }
 
 fn draw_text(buffer: &mut [u32], x: usize, y: usize, text: &str, color: u32, scale: usize) {

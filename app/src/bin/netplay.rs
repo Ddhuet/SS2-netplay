@@ -113,13 +113,23 @@ fn main() {
         .ok()
         .and_then(|p| p.parent().map(Path::to_path_buf))
         .unwrap_or_else(|| PathBuf::from("."));
-    if std::env::args().any(|arg| arg == "--self-test") {
-        let result = ss2_rollback_harness::netplay_selftest::run(&root);
+    let iroh_test = std::env::args().any(|arg| arg == "--self-test-iroh");
+    if iroh_test || std::env::args().any(|arg| arg == "--self-test") {
+        let result = if iroh_test {
+            ss2_rollback_harness::netplay_selftest::run_iroh(&root)
+        } else {
+            ss2_rollback_harness::netplay_selftest::run(&root)
+        };
         let text = match &result {
             Ok(s) => s.clone(),
             Err(e) => format!("FAIL: {e}\n"),
         };
-        let _ = fs::write(root.join("self-test.txt"), text);
+        let filename = if iroh_test {
+            "self-test-iroh.txt"
+        } else {
+            "self-test.txt"
+        };
+        let _ = fs::write(root.join(filename), text);
         std::process::exit(if result.is_ok() { 0 } else { 1 });
     }
     if let Err(e) = run(&root) {
@@ -130,8 +140,24 @@ fn main() {
 fn run(root: &Path) -> Result<(), String> {
     let mut ui = Ui::new(root)?;
     if std::env::args().any(|arg| arg == "--ui-preview") {
-        ui.show_setup("Listening on UDP port 24872. Forward this UDP port to this computer. Waiting for your friend to connect.", true)?;
+        ui.show_setup(
+            "Choose Host to share a connect code, or paste your friend's code and Join.",
+            false,
+        )?;
         ui.write_preview(&root.join("setup-preview.bmp"))?;
+        ui.set_connect_code(format!("ss2-1:{}", "ABCdef0123456789_-".repeat(32)));
+        ui.show_setup(
+            "Listening. Copy your connect code and send it to your friend.",
+            true,
+        )?;
+        ui.write_preview(&root.join("host-code-preview.bmp"))?;
+        ui.show_setup("Ready.", false)?;
+        ui.set_direct_mode(true);
+        ui.show_setup(
+            "Host a UDP port or connect to your friend's numeric IP address.",
+            false,
+        )?;
+        ui.write_preview(&root.join("direct-preview.bmp"))?;
         ui.write_exit_preview(&root.join("exit-preview.bmp"))?;
         ui.write_debug_preview(&root.join("debug-preview.bmp"))?;
         return Ok(());
@@ -147,7 +173,7 @@ fn run(root: &Path) -> Result<(), String> {
         File::create(root.join("logs").join(format!("session-{stamp}.txt")))
             .map_err(|e| e.to_string())?,
     );
-    let mut status = "Put your .gba in ROM. Your character loads and saves in save. Choose Host or enter the host's IP and Connect.".to_string();
+    let mut status = "Put your .gba in ROM. Choose Host to share a connect code, or paste your friend's code and Join.".to_string();
     let mut wire: Option<Wire> = None;
     let mut files: Option<LocalFiles> = None;
     let mut game: Option<Game> = None;
@@ -164,6 +190,35 @@ fn run(root: &Path) -> Result<(), String> {
         if let Some(action) = ui.poll() {
             match action {
                 Action::Quit => break,
+                Action::Cancel if game.is_none() => {
+                    wire = None;
+                    files = None;
+                    ui.set_connect_code(String::new());
+                    status = "Connection cancelled. Choose Host or Join.".into();
+                }
+                action @ (Action::HostCode | Action::JoinCode(_)) if wire.is_none() => {
+                    let code = match action {
+                        Action::JoinCode(code) => Some(code),
+                        _ => None,
+                    };
+                    let validated = code
+                        .as_deref()
+                        .map(ss2_rollback_harness::netplay_iroh::validate_code)
+                        .transpose();
+                    match validated.and_then(|_| LocalFiles::load(root)) {
+                        Ok(local) => {
+                            ui.set_connect_code(String::new());
+                            wire = Some(netplay_wire::spawn_iroh(
+                                code,
+                                local.hello.clone(),
+                                root.join("config"),
+                            ));
+                            files = Some(local);
+                            status = "Starting connection...".into();
+                        }
+                        Err(e) => status = e,
+                    }
+                }
                 Action::Host(port) if wire.is_none() => match LocalFiles::load(root) {
                     Ok(local) => {
                         wire = Some(netplay_wire::spawn(
@@ -200,6 +255,7 @@ fn run(root: &Path) -> Result<(), String> {
             if let Some(network) = &wire {
                 for _ in 0..256 {
                     match network.rx.try_recv() {
+                        Ok(Event::ConnectCode(code)) => ui.set_connect_code(code),
                         Ok(Event::Status(s)) => {
                             writeln!(log, "STATUS {s}").map_err(|e| e.to_string())?;
                             log.flush().map_err(|e| e.to_string())?;
@@ -376,6 +432,7 @@ fn run(root: &Path) -> Result<(), String> {
             save_candidate = None;
             last_saved = false;
             status = e;
+            ui.set_connect_code(String::new());
             ui.show_setup(&status, false)?;
         }
         std::thread::sleep(Duration::from_millis(1));

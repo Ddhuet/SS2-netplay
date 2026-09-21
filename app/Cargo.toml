@@ -22,4 +22,8 @@ quinn = { version = "0.11", default-features = false, features = ["runtime-tokio
 tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros", "io-util", "net"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 rcgen = "0.13"
+iroh = { version = "=1.2.0", default-features = false, features = ["tls-ring", "portmapper"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
 cpal = "0.16"

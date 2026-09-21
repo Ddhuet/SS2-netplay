@@ -113,3 +113,12 @@ Build/test logs live in ignored `app/*-netplay.log`; portable smoke artifacts ar
 under ignored `recordings/portable-smoke-*`. User ROMs and personal saves were not
 read, modified, or included in the package for these tests. Package creation
 preserves any existing user data in the folder and uses an allowlist for the ZIP.
+
+## September 21: Iroh Host/Join and direct fallback
+
+The default setup now uses Host/Join connect codes with Iroh 1.2.0 and n0 public
+relays. Direct Connect switches to the original numeric IP/port Quinn transport.
+Both paths share the existing compatibility/save handshake, bounded frames,
+ordered game messages, and rollback logic. No emulator/getgud changes were needed.
+See [Iroh integration and validation](IROH_RELAY.md) for code format, optional
+relay configuration, tests, and remaining two-network manual validation.

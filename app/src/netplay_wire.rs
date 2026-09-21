@@ -1,4 +1,4 @@
-//! Small direct-IP QUIC transport for the native two-player MVP.
+//! Shared netplay protocol over direct-IP QUIC or Iroh QUIC.
 //!
 //! The emulation/session layer owns the meaning of Message values. This
 //! module only performs the startup compatibility exchange and moves those
@@ -26,7 +26,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use quinn::{ClientConfig, Endpoint, RecvStream, SendStream, ServerConfig};
+use crate::netplay_transport::{Connection, RecvStream, SendStream};
+use quinn::{ClientConfig, Endpoint, ServerConfig};
 use rustls::client::danger::{self, HandshakeSignatureValid, ServerCertVerified};
 use rustls::crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
@@ -60,7 +61,7 @@ pub struct Hello {
 }
 
 impl Hello {
-    fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self) -> Result<(), String> {
         if let Some(save) = &self.save {
             if save.len() != SAVE_SIZE {
                 return Err(format!(
@@ -97,6 +98,8 @@ pub enum Event {
     /// Smoothed transport round-trip time; telemetry is expendable.
     Rtt(Duration),
     Status(String),
+    /// Fresh host invitation, delivered separately so it never enters session logs.
+    ConnectCode(String),
     Connected {
         local_player: usize,
         /// Ordered as host/seat 0 followed by guest/seat 1.
@@ -108,12 +111,12 @@ pub enum Event {
 
 /// Handles for the background transport worker.
 ///
-/// Both channels are bounded. Dropping the tx sender causes the worker to
-/// wind down once the current QUIC operation completes; dropping rx causes
-/// the worker to stop when it next reports an event.
+/// Both channels are bounded. Dropping Wire cancels pending network operations
+/// and stops its runtime, including while waiting for a relay or a guest.
 pub struct Wire {
     pub tx: SyncSender<Message>,
     pub rx: Receiver<Event>,
+    _cancel: tokio::sync::oneshot::Sender<()>,
 }
 
 impl Wire {
@@ -138,15 +141,39 @@ impl Wire {
 /// function returns immediately while the worker binds/connects in the
 /// background.
 pub fn spawn(host: bool, address: SocketAddr, hello: Hello, pins_dir: PathBuf) -> Wire {
+    spawn_target(
+        Target::Direct {
+            host,
+            address,
+            pins_dir,
+        },
+        hello,
+    )
+}
+
+pub fn spawn_iroh(code: Option<String>, hello: Hello, config_dir: PathBuf) -> Wire {
+    spawn_target(Target::Iroh { code, config_dir }, hello)
+}
+
+enum Target {
+    Direct {
+        host: bool,
+        address: SocketAddr,
+        pins_dir: PathBuf,
+    },
+    Iroh {
+        code: Option<String>,
+        config_dir: PathBuf,
+    },
+}
+
+fn spawn_target(target: Target, hello: Hello) -> Wire {
     let (tx, command_rx) = mpsc::sync_channel(CHANNEL_CAPACITY);
     let (event_tx, rx) = mpsc::sync_channel(CHANNEL_CAPACITY);
     let thread_event_tx = event_tx.clone();
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
 
-    let worker_name = if host {
-        "ss2-netplay-host"
-    } else {
-        "ss2-netplay-guest"
-    };
+    let worker_name = "ss2-netplay-network";
     let thread_result = thread::Builder::new()
         .name(worker_name.to_owned())
         .spawn(move || {
@@ -165,16 +192,22 @@ pub fn spawn(host: bool, address: SocketAddr, hello: Hello, pins_dir: PathBuf) -
                 }
             };
 
-            let result = runtime.block_on(run_worker(
-                host,
-                address,
-                hello,
-                pins_dir,
-                command_rx,
-                event_tx.clone(),
-            ));
+            let error_tx = event_tx.clone();
+            let result = runtime.block_on(async move {
+                tokio::select! {
+                    _ = cancel_rx => Ok(()),
+                    result = async {
+                        match target {
+                            Target::Direct { host, address, pins_dir } =>
+                                run_worker(host, address, hello, pins_dir, command_rx, event_tx.clone()).await,
+                            Target::Iroh { code, config_dir } =>
+                                crate::netplay_iroh::run_worker(code, hello, config_dir, command_rx, event_tx.clone()).await,
+                        }
+                    } => result,
+                }
+            });
             if let Err(error) = result {
-                report_error(&event_tx, error);
+                report_error(&error_tx, error);
             }
         });
 
@@ -185,7 +218,11 @@ pub fn spawn(host: bool, address: SocketAddr, hello: Hello, pins_dir: PathBuf) -
         );
     }
 
-    Wire { tx, rx }
+    Wire {
+        tx,
+        rx,
+        _cancel: cancel_tx,
+    }
 }
 
 fn report_error(event_tx: &SyncSender<Event>, error: String) {
@@ -239,11 +276,13 @@ async fn run_worker(
             &event_tx,
             format!("QUIC connected to {}", connection.remote_address()),
         );
-        let (mut send, mut recv) = tokio::time::timeout(STARTUP_TIMEOUT, connection.accept_bi())
+        let (send, recv) = tokio::time::timeout(STARTUP_TIMEOUT, connection.accept_bi())
             .await
             .map_err(|_| "timed out waiting for guest control stream".to_owned())?
             .map_err(|error| format!("failed to accept guest control stream: {error}"))?;
 
+        let mut send = SendStream::Direct(send);
+        let mut recv = RecvStream::Direct(recv);
         let remote_hello = tokio::time::timeout(
             STARTUP_TIMEOUT,
             handshake_host(&mut send, &mut recv, &hello),
@@ -252,7 +291,14 @@ async fn run_worker(
         .map_err(|_| "Startup data exchange timed out")??;
         let saves = [hello.save.clone(), remote_hello.save.clone()];
         report_connected(&event_tx, 0, saves)?;
-        run_stream(connection, send, recv, command_rx, event_tx).await
+        run_stream(
+            Connection::Direct(connection),
+            send,
+            recv,
+            command_rx,
+            event_tx,
+        )
+        .await
     } else {
         report_status(&event_tx, format!("connecting to {address}"));
         let pin_path = certificate_pin_path(&pins_dir, address);
@@ -283,11 +329,13 @@ async fn run_worker(
             &event_tx,
             format!("QUIC connected to {}", connection.remote_address()),
         );
-        let (mut send, mut recv) = tokio::time::timeout(STARTUP_TIMEOUT, connection.open_bi())
+        let (send, recv) = tokio::time::timeout(STARTUP_TIMEOUT, connection.open_bi())
             .await
             .map_err(|_| "timed out opening guest control stream".to_owned())?
             .map_err(|error| format!("failed to open guest control stream: {error}"))?;
 
+        let mut send = SendStream::Direct(send);
+        let mut recv = RecvStream::Direct(recv);
         let remote_hello = tokio::time::timeout(
             STARTUP_TIMEOUT,
             handshake_guest(&mut send, &mut recv, &hello),
@@ -296,17 +344,24 @@ async fn run_worker(
         .map_err(|_| "Startup data exchange timed out")??;
         let saves = [remote_hello.save.clone(), hello.save.clone()];
         report_connected(&event_tx, 1, saves)?;
-        run_stream(connection, send, recv, command_rx, event_tx).await
+        run_stream(
+            Connection::Direct(connection),
+            send,
+            recv,
+            command_rx,
+            event_tx,
+        )
+        .await
     }
 }
 
-fn report_status(event_tx: &SyncSender<Event>, status: String) {
+pub(crate) fn report_status(event_tx: &SyncSender<Event>, status: String) {
     // Status is advisory. A full event queue must never make a bind or
     // connect operation deadlock, so it is safe to discard an old status.
     let _ = event_tx.try_send(Event::Status(status));
 }
 
-fn report_connected(
+pub(crate) fn report_connected(
     event_tx: &SyncSender<Event>,
     local_player: usize,
     saves: [Option<Vec<u8>>; 2],
@@ -319,7 +374,7 @@ fn report_connected(
         .map_err(|_| "event receiver closed during connection setup".to_owned())
 }
 
-async fn handshake_host(
+pub(crate) async fn handshake_host(
     send: &mut SendStream,
     recv: &mut RecvStream,
     local: &Hello,
@@ -343,7 +398,7 @@ async fn handshake_host(
     }
 }
 
-async fn handshake_guest(
+pub(crate) async fn handshake_guest(
     send: &mut SendStream,
     recv: &mut RecvStream,
     local: &Hello,
@@ -606,8 +661,8 @@ fn parse_reject(frame: &[u8]) -> Result<String, String> {
         .map_err(|_| "handshake rejection was not UTF-8".to_owned())
 }
 
-async fn run_stream(
-    connection: quinn::Connection,
+pub(crate) async fn run_stream(
+    connection: Connection,
     mut send: SendStream,
     mut recv: RecvStream,
     command_rx: Receiver<Message>,
@@ -630,11 +685,19 @@ async fn run_stream(
     });
 
     let mut telemetry = tokio::time::interval(Duration::from_millis(250));
+    let mut last_route = None;
     let result = async {
         loop {
             tokio::select! {
                 _ = telemetry.tick() => {
-                    let _ = event_tx.try_send(Event::Rtt(connection.rtt()));
+                    let route = connection.route();
+                    if route != last_route {
+                        if let Some(route) = route { report_status(&event_tx, route.into()); }
+                        last_route = route;
+                    }
+                    if let Some(rtt) = connection.rtt() {
+                        let _ = event_tx.try_send(Event::Rtt(rtt));
+                    }
                 }
                 result = &mut reader => return result.map_err(|e| e.to_string())?,
                 _ = tokio::time::sleep(Duration::from_millis(1)) => {
@@ -659,7 +722,7 @@ async fn run_stream(
         }
     }.await;
     reader.abort();
-    connection.close(0u32.into(), b"netplay stream closed");
+    connection.close();
     result.map_err(|error| format!("network connection closed: {error}"))
 }
 
@@ -931,6 +994,34 @@ fn save_observed_pin(path: &Path, observed: &Mutex<Option<[u8; 32]>>) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancel_stops_idle_listener_even_with_command_sender_alive() {
+        let dir = std::env::temp_dir().join(format!("ss2-cancel-{}", std::process::id()));
+        let Wire { tx, rx, _cancel } = spawn(
+            true,
+            "127.0.0.1:0".parse().unwrap(),
+            Hello {
+                rom_hash: [1; 32],
+                build_hash: [2; 32],
+                save: None,
+            },
+            dir,
+        );
+        loop {
+            match rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+                Event::Status(s) if s.starts_with("Listening") => break,
+                Event::Error(e) => panic!("{e}"),
+                _ => {}
+            }
+        }
+        drop(_cancel);
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        );
+        assert!(tx.send(Message::Leave).is_err());
+    }
 
     #[test]
     fn rejects_malformed_and_invalid_button_messages() {

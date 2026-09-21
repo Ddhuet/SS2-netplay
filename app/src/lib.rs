@@ -1,10 +1,12 @@
 pub mod determinism;
-pub mod netplay_wire;
-pub mod netplay_ui;
 pub mod netplay_audio;
 pub mod netplay_controls;
-pub mod netplay_preferences;
-pub mod netplay_game;
 pub mod netplay_diagnostics;
+pub mod netplay_game;
+pub mod netplay_iroh;
+pub mod netplay_preferences;
 pub mod netplay_selftest;
 pub mod netplay_stats;
+mod netplay_transport;
+pub mod netplay_ui;
+pub mod netplay_wire;

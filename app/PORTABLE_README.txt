@@ -8,22 +8,28 @@ GET STARTED
    computer. Both players must use identical ROM bytes and this same EXE build.
    ROMs and personal saves are not included.
 3. Launch SS2-Netplay.exe on both computers.
-   Choose local delay 1, 2, 3, or 4 frames before Host/Connect (default 2).
+   Choose local delay 1, 2, 3, or 4 frames before Host/Join (default 2).
    Higher delay trades response speed for fewer visible prediction corrections.
    Each player chooses independently; the setting stays fixed during the session.
-4. One player clicks HOST. The default port is 24872, and it can be changed in
-   the Port field before hosting. Forward that UDP port on the host's router to
-   the host computer. Allow the harness through Windows Firewall if prompted.
-5. The other player enters the host's public IP and port and clicks CONNECT.
-   On the same LAN use the host computer's LAN IP. 127.0.0.1 is only for testing
-   two separate copies of the folder on the same computer.
+4. One player clicks HOST, waits for a connect code, and clicks COPY CODE.
+   Send the full code to your friend. Hosting generates a fresh code each time.
+   Iroh uses its public relays for NAT traversal; no VPS or router setup is needed.
+5. The other player pastes the code into CONNECT CODE with Ctrl+V and clicks JOIN.
+   Allow the harness through Windows Firewall if prompted. Click CANCEL to stop
+   listening/connecting and return to setup.
 6. Each setup window becomes that player's game screen. Select Multiplayer and
    create/select a character on both machines. Once both players show OK, player
    1 (the person who clicked Host) presses A to enter the game.
 
-The host waits for the guest until the window is closed. Use IPv4 for internet
-hosting in this build. Port forwarding, public IP discovery, and router setup are
-manual. Networks behind carrier-grade NAT need an actual reachable public IP.
+Iroh attempts a direct peer connection and relays encrypted traffic when needed.
+Public relay availability and network restrictions can affect connectivity.
+
+DIRECT CONNECT FALLBACK
+Click DIRECT CONNECT to switch to numeric IP/port setup (default UDP port 24872).
+One player clicks HOST and forwards that UDP port when needed. The other enters
+that host's public IP and port and clicks CONNECT. On a LAN, use the host's LAN IP;
+127.0.0.1 is for two folder copies on one computer. Click USE CODE to return.
+Direct mode has no automatic NAT traversal; carrier-grade NAT may prevent hosting.
 
 DEFAULT CONTROLS (customizable independently on each computer)
 Arrows = D-pad       Z = A       X = B
@@ -95,21 +101,29 @@ status, recent rollback depth, and the last matching settled state boundary.
 There is a small local presentation delay and a bounded prediction window. During
 a network stall, "Waiting for player" is expected; the session can recover while
 the connection remains alive. A timeout or desync ends the session. Click Host or
-Connect again to restart from the saved cartridges. There is no live reconnect,
-host migration, automatic state replacement, matchmaking, or NAT traversal.
+Join again to restart from the saved cartridges. There is no live reconnect,
+host migration, automatic state replacement, or matchmaking.
 
 Audio uses the default Windows output device. If unavailable, the game continues
 silently and the title says "sound unavailable". Audio-device changes require
 restarting the session. Detailed session/error and final input logs are in logs.
 
 CONNECTION IDENTITY
-The first guest connection trusts the host certificate at the IP/port you entered;
-later connections pin that certificate in config/pins. Host identity is retained
-in config/host-identity.bin. This simple test UI has no password/invitation check:
-the first compatible guest to reach a listening host occupies the second seat.
-Use it with the friend you expect to connect. If the host identity changes, verify
-the host before removing the corresponding pin file and retrying. Do not include
-your generated config, save, or logs folders when sharing a fresh copy publicly.
+Connect codes contain a fresh host public key and connection addresses. Iroh
+checks that key during the encrypted connection. Share the complete code through
+an authentic conversation with your friend; anyone with it can attempt to join.
+Codes are copy/paste invitations, not short numeric room IDs. The first compatible
+peer gets the guest seat. Relays carry encrypted packets, not unencrypted saves.
+
+Direct IP mode retains first-connection certificate trust and later pinning by
+IP/port. A first direct connection does not independently verify host identity.
+After a legitimate host-key change, verify with the host before removing the
+matching pin under config/pins. Do not share generated config, saves, or logs.
+
+No relay configuration is required. Advanced users may put an HTTPS relay origin
+in config/relay-url.txt before hosting; guests obtain it from the code. Remove
+that file to return to the public relays. There is no silent public-relay fallback
+when a custom relay has been explicitly configured.
 
 PORTABILITY / DIAGNOSTICS
 This build preserves video-memory contention timing across rollback restores,
@@ -137,3 +151,7 @@ Optional ROM-free self-test: run SS2-Netplay.exe --self-test from a command prom
 It opens no game window and writes self-test.txt when finished. It starts two real
 local QUIC endpoints, delays inputs, and compares both rollback worlds with a
 direct baseline. This does not replace the manual internet gameplay test.
+
+Optional online Iroh test: SS2-Netplay.exe --self-test-iroh writes self-test-iroh.txt.
+It uses the configured/public relay, generated connect code, and the same synthetic
+rollback comparison. This contacts external relays but sends no personal ROM/save.

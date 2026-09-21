@@ -17,6 +17,15 @@ fn keys(tick: u32, player: usize) -> u32 {
 }
 
 pub fn run(root: &Path) -> Result<String, String> {
+    run_mode(root, false)
+}
+
+/// Explicit online smoke test using the configured relay and synthetic ROM.
+pub fn run_iroh(root: &Path) -> Result<String, String> {
+    run_mode(root, true)
+}
+
+fn run_mode(root: &Path, iroh: bool) -> Result<String, String> {
     let rom = mgba_rollback::testrom::build();
     let saves = [None, None];
     let mut baseline = crate::determinism::boot(&rom, &saves, RTC)?;
@@ -46,17 +55,37 @@ pub fn run(root: &Path) -> Result<String, String> {
         build_hash: [23; 32],
         save: None,
     };
-    let host = netplay_wire::spawn(true, address, hello.clone(), config.join("host"));
+    let host = if iroh {
+        netplay_wire::spawn_iroh(None, hello.clone(), root.join("config"))
+    } else {
+        netplay_wire::spawn(true, address, hello.clone(), config.join("host"))
+    };
     // Wait for the bind operation before asking the guest to connect.
-    match host
-        .rx
-        .recv_timeout(Duration::from_secs(5))
-        .map_err(|e| e.to_string())?
-    {
-        Event::Error(e) => return Err(e),
-        _ => {}
-    }
-    let guest = netplay_wire::spawn(false, address, hello, config.join("guest"));
+    let guest = if iroh {
+        let deadline = Instant::now() + Duration::from_secs(40);
+        let code = loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match host.rx.recv_timeout(remaining).map_err(|e| e.to_string())? {
+                Event::ConnectCode(code) => break code,
+                Event::Error(e) => return Err(e),
+                _ => {}
+            }
+        };
+        netplay_wire::spawn_iroh(Some(code), hello, root.join("config"))
+    } else {
+        loop {
+            match host
+                .rx
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|e| e.to_string())?
+            {
+                Event::Status(s) if s.starts_with("Listening") => break,
+                Event::Error(e) => return Err(e),
+                _ => {}
+            }
+        }
+        netplay_wire::spawn(false, address, hello, config.join("guest"))
+    };
     let wires = [host, guest];
     let mut games: [Option<Game>; 2] = [None, None];
     let mut pending: [VecDeque<(Instant, Message)>; 2] = Default::default();
@@ -64,7 +93,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     let mut next_tick = [Instant::now(); 2];
     let mut rtt_received = [false; 2];
     loop {
-        if start.elapsed() > Duration::from_secs(25) {
+        if start.elapsed() > Duration::from_secs(if iroh { 60 } else { 25 }) {
             return Err(format!(
                 "Self-test timed out: {:?}",
                 games.each_ref().map(|g| g
@@ -103,7 +132,7 @@ pub fn run(root: &Path) -> Result<String, String> {
                     }
                     Event::Error(e) => return Err(e),
                     Event::Rtt(rtt) => rtt_received[p] |= !rtt.is_zero(),
-                    Event::Status(_) => {}
+                    Event::Status(_) | Event::ConnectCode(_) => {}
                 }
             }
             let Some(game) = &mut games[p] else {

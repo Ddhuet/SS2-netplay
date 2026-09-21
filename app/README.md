@@ -2,9 +2,10 @@
 
 ## Portable internet test client
 
-`SS2-Netplay` is the native Host/Connect client. It embeds mGBA, uses direct-IP
-QUIC over UDP (default port 24872), and loads `ROM/` and `save/` relative to its
-EXE. See [PORTABLE_README.txt](PORTABLE_README.txt) for player instructions.
+`SS2-Netplay` is the native Host/Join client. It embeds mGBA and defaults to
+Iroh connect codes with public relays and automatic NAT traversal. Direct Connect
+retains IP/port QUIC (default UDP port 24872). It loads `ROM/` and `save/` relative
+to its EXE. See [PORTABLE_README.txt](PORTABLE_README.txt) for player instructions.
 
 Build with `./build-netplay.ps1`; run the app suite with
 `./build-netplay.ps1 -Test`; create the portable folder and ZIP with
@@ -14,6 +15,14 @@ extract the package and launch its EXE without compiling or installing mGBA.
 `SS2-Netplay.exe --self-test` runs a ROM-free real-QUIC rollback smoke test and
 writes `self-test.txt` beside the EXE. It does not test SS2 save menus. The user
 requested that actual in-game save/reload behavior remain a manual check.
+
+`SS2-Netplay.exe --self-test-iroh` runs the same synthetic rollback check over
+Iroh with the configured/public relay and writes `self-test-iroh.txt`. The explicit
+network integration test `real_iroh_public_relay_only` is ignored by default;
+run it with `cargo test --locked --lib real_iroh_public_relay_only -- --ignored`
+using the same build environment as `build-netplay.ps1`. It disables direct UDP
+transports so save/message exchange must cross public relays.
+See [Iroh integration notes](../notes/IROH_RELAY.md).
 
 ## Phase 3 local cable frontend
 
